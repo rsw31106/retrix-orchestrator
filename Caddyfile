@@ -1,0 +1,23 @@
+retrix.rebitgames.com {
+    # API & WebSocket → FastAPI backend
+    handle /api/* {
+        reverse_proxy localhost:8000
+    }
+
+    handle /ws {
+        reverse_proxy localhost:8000
+    }
+
+    # Frontend static files
+    # NOTE: Update path to your actual retrix location
+    handle {
+        root * C:\Project\AIProjects\Retrix\retrix\frontend\dist
+        file_server
+        try_files {path} /index.html
+    }
+
+    log {
+        output file C:\Project\AIProjects\Retrix\retrix\logs\caddy.log
+        format json
+    }
+}
