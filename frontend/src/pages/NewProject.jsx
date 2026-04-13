@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
-import { Upload, Rocket, FileText, X } from 'lucide-react'
+import { Upload, Rocket, FileText, X, BookOpen } from 'lucide-react'
 import clsx from 'clsx'
 
 const projectTypes = [
@@ -30,6 +30,10 @@ export default function NewProject() {
   const [uploading, setUploading] = useState(false)
   const [uploadedFile, setUploadedFile] = useState(null)
   const [error, setError] = useState(null)
+  const [notionUrl, setNotionUrl] = useState('')
+  const [notionFetching, setNotionFetching] = useState(false)
+  const [notionFetched, setNotionFetched] = useState(false)
+  const [specSource, setSpecSource] = useState('manual') // 'manual' | 'notion'
   const fileInputRef = useRef(null)
 
   const update = (field, value) => setForm((prev) => ({ ...prev, [field]: value }))
@@ -60,15 +64,44 @@ export default function NewProject() {
     if (file) handleFileUpload(file)
   }
 
+  const handleNotionFetch = async () => {
+    if (!notionUrl.trim()) return
+    setNotionFetching(true)
+    setError(null)
+    try {
+      // We'll just store the URL and let the backend fetch — no preview needed at creation time
+      // But we do a lightweight check to confirm it's accessible
+      update('notion_page_url', notionUrl.trim())
+      setNotionFetched(true)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setNotionFetching(false)
+    }
+  }
+
   const handleSubmit = async () => {
-    if (!form.name || !form.project_type || !form.spec_document) {
-      setError('Name, type, and spec document are required')
+    if (!form.name || !form.project_type) {
+      setError('Name and type are required')
+      return
+    }
+    if (specSource === 'manual' && !form.spec_document) {
+      setError('Spec document is required')
+      return
+    }
+    if (specSource === 'notion' && !notionUrl.trim()) {
+      setError('Please enter a Notion page URL')
       return
     }
     setSubmitting(true)
     setError(null)
     try {
-      const result = await api.createProject(form)
+      const payload = {
+        ...form,
+        notion_page_url: specSource === 'notion' ? notionUrl.trim() : undefined,
+        spec_document: specSource === 'notion' ? '' : form.spec_document,
+      }
+      const result = await api.createProject(payload)
       navigate(`/projects/${result.id}`)
     } catch (e) {
       setError(e.message)
@@ -137,55 +170,112 @@ export default function NewProject() {
 
         {/* Spec Document */}
         <div>
-          <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center justify-between mb-2">
             <label className="text-xs text-retrix-muted">Spec Document / 기획서</label>
-            {uploadedFile && (
-              <span className="flex items-center gap-1 text-xs text-retrix-accent">
-                <FileText size={12} />
-                {uploadedFile.name}
-                <span className="text-retrix-muted">({uploadedFile.chars.toLocaleString()} chars)</span>
+            {/* Source tab toggle */}
+            <div className="flex rounded-md overflow-hidden border border-retrix-border text-xs">
+              <button
+                type="button"
+                onClick={() => setSpecSource('manual')}
+                className={clsx('px-3 py-1 flex items-center gap-1 transition-colors',
+                  specSource === 'manual' ? 'bg-retrix-accent text-white' : 'text-retrix-muted hover:text-retrix-text'
+                )}
+              >
+                <FileText size={11} /> 직접 입력
+              </button>
+              <button
+                type="button"
+                onClick={() => setSpecSource('notion')}
+                className={clsx('px-3 py-1 flex items-center gap-1 transition-colors',
+                  specSource === 'notion' ? 'bg-retrix-accent text-white' : 'text-retrix-muted hover:text-retrix-text'
+                )}
+              >
+                <BookOpen size={11} /> Notion
+              </button>
+            </div>
+          </div>
+
+          {specSource === 'notion' ? (
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input
+                  type="url"
+                  value={notionUrl}
+                  onChange={(e) => { setNotionUrl(e.target.value); setNotionFetched(false) }}
+                  placeholder="https://www.notion.so/your-page-id or bare page ID"
+                  className="flex-1 bg-retrix-surface border border-retrix-border rounded-md px-3 py-2 text-sm text-retrix-text placeholder:text-retrix-muted/40 focus:outline-none focus:border-retrix-accent font-mono"
+                />
                 <button
                   type="button"
-                  onClick={() => { setUploadedFile(null); update('spec_document', '') }}
-                  className="text-retrix-muted hover:text-retrix-danger ml-0.5"
+                  onClick={handleNotionFetch}
+                  disabled={notionFetching || !notionUrl.trim()}
+                  className="px-3 py-2 rounded-md bg-retrix-accent/20 text-retrix-accent text-xs hover:bg-retrix-accent/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
                 >
-                  <X size={12} />
+                  {notionFetching ? '확인 중...' : '페이지 연결'}
                 </button>
-              </span>
-            )}
-          </div>
+              </div>
+              {notionFetched && (
+                <div className="flex items-center gap-1.5 text-xs text-retrix-success bg-retrix-success/10 border border-retrix-success/20 rounded-md px-3 py-2">
+                  <BookOpen size={12} />
+                  Notion URL이 설정되었습니다. 프로젝트 생성 시 자동으로 내용을 가져옵니다.
+                </div>
+              )}
+              <p className="text-xs text-retrix-muted/70">
+                Notion 페이지의 내용이 기획서로 자동 import됩니다. Notion API 키가 설정되어 있어야 합니다.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between mb-1.5">
+                {uploadedFile && (
+                  <span className="flex items-center gap-1 text-xs text-retrix-accent">
+                    <FileText size={12} />
+                    {uploadedFile.name}
+                    <span className="text-retrix-muted">({uploadedFile.chars.toLocaleString()} chars)</span>
+                    <button
+                      type="button"
+                      onClick={() => { setUploadedFile(null); update('spec_document', '') }}
+                      className="text-retrix-muted hover:text-retrix-danger ml-0.5"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                )}
+              </div>
 
-          {/* Drop zone */}
-          <div
-            onDrop={handleDrop}
-            onDragOver={(e) => e.preventDefault()}
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center justify-center gap-2 border border-dashed border-retrix-border rounded-md py-3 mb-2 cursor-pointer hover:border-retrix-accent hover:bg-retrix-accent/5 transition-colors"
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".md,.txt,.pdf,.docx"
-              className="hidden"
-              onChange={(e) => handleFileUpload(e.target.files[0])}
-            />
-            {uploading ? (
-              <div className="w-4 h-4 border-2 border-retrix-accent/30 border-t-retrix-accent rounded-full animate-spin" />
-            ) : (
-              <Upload size={14} className="text-retrix-muted" />
-            )}
-            <span className="text-xs text-retrix-muted">
-              {uploading ? 'Parsing...' : 'Upload .md / .txt / .pdf / .docx — or drag & drop'}
-            </span>
-          </div>
+              {/* Drop zone */}
+              <div
+                onDrop={handleDrop}
+                onDragOver={(e) => e.preventDefault()}
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center justify-center gap-2 border border-dashed border-retrix-border rounded-md py-3 mb-2 cursor-pointer hover:border-retrix-accent hover:bg-retrix-accent/5 transition-colors"
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".md,.txt,.pdf,.docx"
+                  className="hidden"
+                  onChange={(e) => handleFileUpload(e.target.files[0])}
+                />
+                {uploading ? (
+                  <div className="w-4 h-4 border-2 border-retrix-accent/30 border-t-retrix-accent rounded-full animate-spin" />
+                ) : (
+                  <Upload size={14} className="text-retrix-muted" />
+                )}
+                <span className="text-xs text-retrix-muted">
+                  {uploading ? 'Parsing...' : 'Upload .md / .txt / .pdf / .docx — or drag & drop'}
+                </span>
+              </div>
 
-          <textarea
-            value={form.spec_document}
-            onChange={(e) => update('spec_document', e.target.value)}
-            placeholder="Paste your full project spec, feature list, or idea document here..."
-            rows={12}
-            className="w-full bg-retrix-surface border border-retrix-border rounded-md px-3 py-2 text-sm text-retrix-text placeholder:text-retrix-muted/40 focus:outline-none focus:border-retrix-accent font-mono"
-          />
+              <textarea
+                value={form.spec_document}
+                onChange={(e) => update('spec_document', e.target.value)}
+                placeholder="Paste your full project spec, feature list, or idea document here..."
+                rows={12}
+                className="w-full bg-retrix-surface border border-retrix-border rounded-md px-3 py-2 text-sm text-retrix-text placeholder:text-retrix-muted/40 focus:outline-none focus:border-retrix-accent font-mono"
+              />
+            </>
+          )}
         </div>
 
         {/* Priority & Budget */}

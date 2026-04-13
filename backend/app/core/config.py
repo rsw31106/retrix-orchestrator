@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # Notifications
     slack_webhook_url: str = ""
 
+    # Notion
+    notion_api_key: str = ""
+
     @property
     def mysql_url(self) -> str:
         return (

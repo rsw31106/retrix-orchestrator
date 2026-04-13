@@ -85,6 +85,12 @@ class Project(Base):
     # Workspace (local path where workers operate)
     workspace_path = Column(String(500), nullable=True)    # e.g. D:\Projects\my-game
 
+    # Notion integration
+    notion_page_id = Column(String(64), nullable=True)
+    notion_page_url = Column(String(500), nullable=True)
+    notion_last_content_hash = Column(String(32), nullable=True)   # sha256[:16] of last synced content
+    notion_last_synced_at = Column(DateTime, nullable=True)
+
     # 메타
     priority = Column(Integer, default=5)  # 1(highest) ~ 10(lowest)
     archived = Column(Boolean, default=False)

@@ -35,3 +35,6 @@ pydantic-settings==2.7.1
 # File parsing (spec document upload)
 pypdf>=4.0.0
 python-docx>=1.1.0
+
+# Notion integration
+notion-client==2.3.0

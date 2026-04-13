@@ -5,6 +5,7 @@ import StatusBadge from '../components/StatusBadge'
 import {
   ArrowLeft, Pause, Play, Trash2, RotateCcw, Hand,
   ChevronDown, ChevronRight, Clock, Cpu, AlertTriangle, Loader,
+  RefreshCw, BookOpen, CheckCircle, XCircle, Link,
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -202,6 +203,165 @@ function TaskRow({ task, onRetry, onHold, onUpdateInstruction }) {
   )
 }
 
+function NotionSyncPanel({ projectId, notionPageUrl, notionLastSynced, onSynced }) {
+  const [syncing, setSyncing] = useState(false)
+  const [preview, setPreview] = useState(null) // null | { changed, pm_analysis, new_hash } | { changed: false }
+  const [applying, setApplying] = useState(false)
+  const [connectUrl, setConnectUrl] = useState('')
+  const [connecting, setConnecting] = useState(false)
+  const [showConnect, setShowConnect] = useState(false)
+  const [error, setError] = useState(null)
+
+  const handleConnect = async () => {
+    if (!connectUrl.trim()) return
+    setConnecting(true)
+    setError(null)
+    try {
+      await api.notionConnect(projectId, connectUrl.trim())
+      setShowConnect(false)
+      setConnectUrl('')
+      onSynced()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  const handleSyncPreview = async () => {
+    setSyncing(true)
+    setPreview(null)
+    setError(null)
+    try {
+      const result = await api.notionSyncPreview(projectId)
+      setPreview(result)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const handleApply = async () => {
+    if (!preview?.pm_analysis) return
+    setApplying(true)
+    setError(null)
+    try {
+      const result = await api.notionSyncApply(projectId, true, preview.pm_analysis)
+      setPreview(null)
+      onSynced()
+      alert(`Sync applied! ${result.tasks_created} new task(s) created.`)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  const handleCancel = async () => {
+    await api.notionSyncApply(projectId, false, '')
+    setPreview(null)
+  }
+
+  return (
+    <div className="bg-retrix-surface border border-retrix-border rounded-lg p-4 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <BookOpen size={14} className="text-retrix-accent" />
+          <h3 className="text-xs font-medium text-retrix-muted uppercase tracking-wider">Notion Integration</h3>
+        </div>
+        {notionPageUrl ? (
+          <button
+            onClick={handleSyncPreview}
+            disabled={syncing}
+            className="flex items-center gap-1.5 px-3 py-1 text-xs bg-retrix-accent/10 text-retrix-accent rounded-md hover:bg-retrix-accent/20 disabled:opacity-50"
+          >
+            <RefreshCw size={11} className={syncing ? 'animate-spin' : ''} />
+            {syncing ? '확인 중...' : 'Sync'}
+          </button>
+        ) : (
+          <button
+            onClick={() => setShowConnect(!showConnect)}
+            className="flex items-center gap-1.5 px-3 py-1 text-xs bg-retrix-border/50 text-retrix-muted rounded-md hover:bg-retrix-border hover:text-retrix-text"
+          >
+            <Link size={11} /> Notion 연결
+          </button>
+        )}
+      </div>
+
+      {notionPageUrl ? (
+        <div className="text-xs text-retrix-muted font-mono truncate">
+          <span className="text-retrix-muted/60">Page: </span>
+          <a href={notionPageUrl} target="_blank" rel="noopener noreferrer" className="text-retrix-accent hover:underline">{notionPageUrl}</a>
+          {notionLastSynced && <span className="ml-2 text-retrix-muted/50">Last synced: {new Date(notionLastSynced).toLocaleString()}</span>}
+        </div>
+      ) : showConnect ? (
+        <div className="space-y-2 mt-2">
+          <div className="flex gap-2">
+            <input
+              type="url"
+              value={connectUrl}
+              onChange={(e) => setConnectUrl(e.target.value)}
+              placeholder="https://www.notion.so/..."
+              className="flex-1 bg-retrix-bg border border-retrix-border rounded-md px-3 py-1.5 text-xs text-retrix-text placeholder:text-retrix-muted/40 focus:outline-none focus:border-retrix-accent font-mono"
+            />
+            <button
+              onClick={handleConnect}
+              disabled={connecting || !connectUrl.trim()}
+              className="px-3 py-1.5 bg-retrix-accent text-white text-xs rounded-md disabled:opacity-50 hover:bg-retrix-accent/90"
+            >
+              {connecting ? '연결 중...' : '연결'}
+            </button>
+          </div>
+          <p className="text-xs text-retrix-muted/60">Notion 페이지를 연결하면 spec이 자동으로 import됩니다.</p>
+        </div>
+      ) : (
+        <p className="text-xs text-retrix-muted/60">연결된 Notion 페이지가 없습니다.</p>
+      )}
+
+      {error && (
+        <div className="mt-2 text-xs text-retrix-danger bg-retrix-danger/10 rounded-md px-3 py-2">{error}</div>
+      )}
+
+      {preview && (
+        <div className="mt-3 border-t border-retrix-border pt-3">
+          {!preview.changed ? (
+            <div className="flex items-center gap-2 text-xs text-retrix-success">
+              <CheckCircle size={12} />
+              변경사항 없음 — 페이지 내용이 마지막 sync 이후 바뀌지 않았습니다.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-xs font-medium text-retrix-warning flex items-center gap-1.5">
+                <AlertTriangle size={12} /> 변경사항이 감지되었습니다. PM 분석 결과:
+              </p>
+              <pre className="bg-retrix-bg border border-retrix-border rounded-md p-3 text-xs text-retrix-text font-mono whitespace-pre-wrap max-h-60 overflow-y-auto">
+                {preview.pm_analysis}
+              </pre>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleApply}
+                  disabled={applying}
+                  className="flex items-center gap-1.5 px-4 py-1.5 bg-retrix-accent text-white text-xs rounded-md hover:bg-retrix-accent/90 disabled:opacity-50"
+                >
+                  <CheckCircle size={12} />
+                  {applying ? '적용 중...' : '확인 — 적용하기'}
+                </button>
+                <button
+                  onClick={handleCancel}
+                  className="flex items-center gap-1.5 px-4 py-1.5 bg-retrix-border text-retrix-muted text-xs rounded-md hover:bg-retrix-border/70"
+                >
+                  <XCircle size={12} /> 취소
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ProjectDetail({ subscribe }) {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -337,6 +497,14 @@ export default function ProjectDetail({ subscribe }) {
           <span>Budget: ${project.budget_limit?.toFixed(2) || '∞'}</span>
         </div>
       </div>
+
+      {/* Notion Integration */}
+      <NotionSyncPanel
+        projectId={id}
+        notionPageUrl={project.notion_page_url}
+        notionLastSynced={project.notion_last_synced_at}
+        onSynced={loadProject}
+      />
 
       {/* Analysis Result */}
       {project.analysis_result && (

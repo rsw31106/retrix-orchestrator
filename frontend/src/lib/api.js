@@ -97,6 +97,16 @@ export const api = {
     return fetchApi(`/activity?${q}`)
   },
 
+  // Notion integration
+  notionConnect: (projectId, notionPageUrl) =>
+    fetchApi(`/projects/${projectId}/notion/connect`, { method: 'POST', body: JSON.stringify({ notion_page_url: notionPageUrl }) }),
+  notionSyncPreview: (projectId) => fetchApi(`/projects/${projectId}/notion/sync-preview`),
+  notionSyncApply: (projectId, confirmed, changeSummary) =>
+    fetchApi(`/projects/${projectId}/notion/sync-apply`, {
+      method: 'POST',
+      body: JSON.stringify({ confirmed, change_summary: changeSummary }),
+    }),
+
   // File upload
   uploadSpec: (file) => {
     const token = getToken()

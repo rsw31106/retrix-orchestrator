@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Save, Cpu, Users, Loader2, CheckCircle, AlertCircle, Bell } from 'lucide-react'
+import { Save, Cpu, Users, Loader2, CheckCircle, AlertCircle, Bell, BookOpen } from 'lucide-react'
 import { api } from '../lib/api'
 
 function Toggle({ checked, onChange }) {
@@ -27,6 +27,8 @@ export default function Settings() {
   const [dailyBudget, setDailyBudget] = useState('')
   const [projectBudget, setProjectBudget] = useState('')
   const [slackWebhook, setSlackWebhook] = useState('')
+  const [notionApiKey, setNotionApiKey] = useState('')
+  const [notionConfigured, setNotionConfigured] = useState(false)
   const [models, setModels] = useState({})
   const [workers, setWorkers] = useState({})
 
@@ -36,6 +38,9 @@ export default function Settings() {
         setDailyBudget(data.daily_budget ?? '')
         setProjectBudget(data.project_budget ?? '')
         setSlackWebhook(data.slack_webhook ?? '')
+        // Don't pre-fill password fields with masked values; just indicate if set
+        setNotionApiKey('')
+        setNotionConfigured(!!data.notion_api_key)
         // Index models/workers by key
         const mMap = {}
         ;(data.models || []).forEach((m) => { mMap[m.key] = m })
@@ -78,6 +83,7 @@ export default function Settings() {
         daily_budget: dailyBudget === '' ? null : parseFloat(dailyBudget),
         project_budget: projectBudget === '' ? null : parseFloat(projectBudget),
         slack_webhook: slackWebhook || null,
+        notion_api_key: notionApiKey || null,
         models: modelsPayload,
         workers: workersPayload,
       })
@@ -226,6 +232,34 @@ export default function Settings() {
           />
           <p className="text-[11px] text-retrix-muted mt-1.5">
             Notified on: project complete, project failed, 80% daily budget
+          </p>
+        </div>
+      </div>
+
+      {/* Notion Integration */}
+      <div className="bg-retrix-surface border border-retrix-border rounded-lg p-4 mb-4">
+        <div className="flex items-center gap-2 mb-4">
+          <BookOpen size={14} className="text-retrix-accent" />
+          <h3 className="text-xs font-medium text-retrix-muted uppercase tracking-wider">Notion Integration</h3>
+        </div>
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-xs text-retrix-muted">Notion API Key</label>
+            {notionConfigured && !notionApiKey && (
+              <span className="text-[10px] text-retrix-success flex items-center gap-1">
+                <CheckCircle size={10} /> 설정됨
+              </span>
+            )}
+          </div>
+          <input
+            type="password"
+            placeholder={notionConfigured ? '변경하려면 새 키를 입력하세요' : 'secret_...'}
+            value={notionApiKey}
+            onChange={(e) => setNotionApiKey(e.target.value)}
+            className="w-full bg-retrix-bg border border-retrix-border rounded-md px-3 py-2 text-sm text-retrix-text focus:outline-none focus:border-retrix-accent font-mono"
+          />
+          <p className="text-[11px] text-retrix-muted mt-1.5">
+            Notion Integration 설정 페이지에서 발급한 Internal Integration Token. 비워두면 기존 값 유지.
           </p>
         </div>
       </div>

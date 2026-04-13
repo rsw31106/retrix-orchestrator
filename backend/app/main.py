@@ -55,7 +55,11 @@ def _migrate_schema():
         ("projects", "github_branch",   "ALTER TABLE projects ADD COLUMN github_branch VARCHAR(100) DEFAULT 'main'"),
         ("projects", "github_clone_url","ALTER TABLE projects ADD COLUMN github_clone_url VARCHAR(500) NULL"),
         ("projects", "workspace_path",  "ALTER TABLE projects ADD COLUMN workspace_path VARCHAR(500) NULL"),
-        ("projects", "archived",        "ALTER TABLE projects ADD COLUMN archived TINYINT(1) NOT NULL DEFAULT 0"),
+        ("projects", "archived",              "ALTER TABLE projects ADD COLUMN archived TINYINT(1) NOT NULL DEFAULT 0"),
+        ("projects", "notion_page_id",        "ALTER TABLE projects ADD COLUMN notion_page_id VARCHAR(64) NULL"),
+        ("projects", "notion_page_url",       "ALTER TABLE projects ADD COLUMN notion_page_url VARCHAR(500) NULL"),
+        ("projects", "notion_last_content_hash", "ALTER TABLE projects ADD COLUMN notion_last_content_hash VARCHAR(32) NULL"),
+        ("projects", "notion_last_synced_at", "ALTER TABLE projects ADD COLUMN notion_last_synced_at DATETIME NULL"),
         # tasks table
         ("tasks", "instruction", "ALTER TABLE tasks ADD COLUMN instruction TEXT NULL"),
         # worker_configs table
@@ -191,6 +195,16 @@ class ProjectCreate(BaseModel):
     github_create_repo: bool = False
     github_repo_name: Optional[str] = None
     github_private: bool = True
+    notion_page_url: Optional[str] = None   # optional: attach Notion page on creation
+
+
+class NotionConnectRequest(BaseModel):
+    notion_page_url: str
+
+
+class NotionSyncApplyRequest(BaseModel):
+    confirmed: bool
+    change_summary: str   # echo back PM's summary for logging
 
 
 class TaskRetry(BaseModel):
@@ -243,6 +257,7 @@ class SettingsUpdate(BaseModel):
     daily_budget: Optional[float] = None
     project_budget: Optional[float] = None
     slack_webhook: Optional[str] = None
+    notion_api_key: Optional[str] = None
     models: Optional[dict[str, ModelConfigUpdate]] = None
     workers: Optional[dict[str, WorkerConfigUpdate]] = None
 
@@ -341,6 +356,9 @@ def get_project(project_id: int, db: Session = Depends(get_db), user: dict = Dep
         "github_repo": project.github_repo,
         "github_clone_url": project.github_clone_url,
         "workspace_path": project.workspace_path,
+        "notion_page_id": project.notion_page_id,
+        "notion_page_url": project.notion_page_url,
+        "notion_last_synced_at": project.notion_last_synced_at.isoformat() if project.notion_last_synced_at else None,
         "tasks": tasks,
         "created_at": project.created_at.isoformat() if project.created_at else None,
     }
@@ -360,15 +378,39 @@ async def create_project(
         safe_name = body.name.lower().replace(" ", "-").replace("/", "-")
         workspace = os.path.join(settings.workspace_root, safe_name)
 
+    # Notion page fetch (if URL provided)
+    notion_page_id = None
+    notion_content_hash = None
+    spec_from_notion = body.spec_document
+    notion_page_url_stored = None
+    if body.notion_page_url:
+        try:
+            from app.services.notion import extract_page_id, fetch_page_as_markdown, compute_hash
+            import datetime as _dt
+            notion_page_id = extract_page_id(body.notion_page_url)
+            _title, notion_md = await fetch_page_as_markdown(notion_page_id)
+            if notion_md and not body.spec_document:
+                spec_from_notion = notion_md
+            notion_content_hash = compute_hash(notion_md)
+            notion_page_url_stored = body.notion_page_url
+        except Exception as e:
+            print(f"[WARN] Notion fetch failed: {e}")
+
     project = Project(
         name=body.name,
         project_type=body.project_type,
         description=body.description,
-        spec_document=body.spec_document,
+        spec_document=spec_from_notion,
         budget_limit=body.budget_limit or settings.project_budget_limit,
         priority=body.priority,
         workspace_path=workspace,
+        notion_page_id=notion_page_id,
+        notion_page_url=notion_page_url_stored,
+        notion_last_content_hash=notion_content_hash,
     )
+    if notion_content_hash:
+        import datetime as _dt
+        project.notion_last_synced_at = _dt.datetime.utcnow()
 
     # GitHub repo creation
     if body.github_create_repo and settings.github_token:
@@ -401,7 +443,7 @@ async def create_project(
         background_tasks.add_task(_git_clone, project.github_clone_url, workspace)
 
     # Start orchestration
-    background_tasks.add_task(run_project, project.id, body.spec_document)
+    background_tasks.add_task(run_project, project.id, spec_from_notion)
     background_tasks.add_task(
         _log_activity, "user", user["sub"],
         f"Created project: {project.name}",
@@ -487,6 +529,213 @@ def unarchive_project(project_id: int, db: Session = Depends(get_db), user: dict
     project.archived = False
     db.commit()
     return {"status": "unarchived"}
+
+
+# ──────────────────────────────────────
+# Notion Integration (protected)
+# ──────────────────────────────────────
+@app.post("/api/projects/{project_id}/notion/connect")
+async def notion_connect(
+    project_id: int,
+    body: NotionConnectRequest,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Attach a Notion page to an existing project and import its content as spec."""
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    from app.services.notion import extract_page_id, fetch_page_as_markdown, compute_hash
+    import datetime as _dt
+
+    try:
+        page_id = extract_page_id(body.notion_page_url)
+        title, content = await fetch_page_as_markdown(page_id)
+    except Exception as e:
+        raise HTTPException(400, f"Failed to fetch Notion page: {e}")
+
+    project.notion_page_id = page_id
+    project.notion_page_url = body.notion_page_url
+    project.notion_last_content_hash = compute_hash(content)
+    project.notion_last_synced_at = _dt.datetime.utcnow()
+    if not project.spec_document and content:
+        project.spec_document = content
+    db.commit()
+
+    await _log_activity("user", user["sub"], f"Connected Notion page to project: {project.name}",
+                        detail={"page_id": page_id, "notion_url": body.notion_page_url},
+                        project_id=project_id, db=db)
+    return {"status": "connected", "page_id": page_id, "title": title}
+
+
+@app.get("/api/projects/{project_id}/notion/sync-preview")
+async def notion_sync_preview(
+    project_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Fetch current Notion content, detect changes, ask PM to summarize diff and suggest tasks."""
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if not project.notion_page_id:
+        raise HTTPException(400, "No Notion page connected to this project")
+
+    from app.services.notion import fetch_page_as_markdown, compute_hash
+    from app.services.model_pool import model_pool
+
+    try:
+        title, new_content = await fetch_page_as_markdown(project.notion_page_id)
+    except Exception as e:
+        raise HTTPException(400, f"Failed to fetch Notion page: {e}")
+
+    new_hash = compute_hash(new_content)
+    if new_hash == project.notion_last_content_hash:
+        return {"changed": False, "message": "Notion page has not changed since last sync."}
+
+    old_spec = project.spec_document or ""
+
+    # Ask PM to analyze the diff
+    pm_prompt = f"""The project spec document has been updated on Notion. Analyze what changed and suggest development tasks.
+
+Project: {project.name}
+Project Type: {project.project_type.value}
+
+=== PREVIOUS SPEC ===
+{old_spec[:3000]}
+
+=== UPDATED SPEC (from Notion) ===
+{new_content[:3000]}
+
+Please provide:
+1. A concise summary of what changed (bullet points)
+2. A list of suggested new development tasks based on the changes
+
+Format your response as:
+## Changes Summary
+- ...
+
+## Suggested Tasks
+1. [Task title] — [brief description]
+2. ...
+
+Be specific and actionable. Respond in the same language as the spec document."""
+
+    response = await model_pool.call(
+        model="haiku",
+        system_prompt="You are Retrix PM analyzing spec document changes to plan development work.",
+        user_prompt=pm_prompt,
+        temperature=0.3,
+        max_tokens=2000,
+    )
+
+    return {
+        "changed": True,
+        "title": title,
+        "new_hash": new_hash,
+        "pm_analysis": response.content,
+        "tokens": response.input_tokens + response.output_tokens,
+        "cost": response.cost_usd,
+    }
+
+
+@app.post("/api/projects/{project_id}/notion/sync-apply")
+async def notion_sync_apply(
+    project_id: int,
+    body: NotionSyncApplyRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """User confirmed the sync. Update spec and create new tasks from PM's analysis."""
+    if not body.confirmed:
+        return {"status": "cancelled"}
+
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if not project.notion_page_id:
+        raise HTTPException(400, "No Notion page connected to this project")
+
+    from app.services.notion import fetch_page_as_markdown, compute_hash
+    from app.services.model_pool import model_pool
+    import datetime as _dt
+
+    try:
+        _title, new_content = await fetch_page_as_markdown(project.notion_page_id)
+    except Exception as e:
+        raise HTTPException(400, f"Failed to fetch Notion page: {e}")
+
+    # Update spec and hash
+    project.spec_document = new_content
+    project.notion_last_content_hash = compute_hash(new_content)
+    project.notion_last_synced_at = _dt.datetime.utcnow()
+
+    # Ask PM to produce structured task list from the analysis
+    task_prompt = f"""Based on this analysis of spec changes, generate a structured list of new development tasks.
+
+{body.change_summary}
+
+Project: {project.name}
+
+Return ONLY a JSON array in this exact format (no markdown, no explanation):
+[
+  {{"title": "Task title", "description": "What needs to be done", "priority": 5}},
+  ...
+]"""
+
+    task_response = await model_pool.call(
+        model="haiku",
+        system_prompt="You are Retrix PM. Output only valid JSON arrays, no extra text.",
+        user_prompt=task_prompt,
+        temperature=0.2,
+        max_tokens=2000,
+    )
+
+    # Parse tasks and create them
+    created_tasks = []
+    try:
+        raw = task_response.content.strip()
+        # Strip possible markdown fences
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        task_defs = json.loads(raw.strip())
+        if not isinstance(task_defs, list):
+            task_defs = []
+    except Exception:
+        task_defs = []
+
+    # Determine next order value
+    max_order = db.query(Task).filter(Task.project_id == project_id).count()
+    for i, td in enumerate(task_defs):
+        t = Task(
+            project_id=project_id,
+            title=td.get("title", "Untitled task"),
+            description=td.get("description", ""),
+            priority=td.get("priority", 5),
+            order=max_order + i,
+            status=TaskStatus.PENDING,
+        )
+        db.add(t)
+        created_tasks.append(t.title)
+
+    db.commit()
+
+    await _log_activity("user", user["sub"],
+                        f"Applied Notion sync for project: {project.name}",
+                        detail={"tasks_created": len(created_tasks), "change_summary": body.change_summary[:300]},
+                        project_id=project_id, db=db)
+
+    # If project is paused/completed, resume it
+    if project.status in (ProjectStatus.COMPLETED, ProjectStatus.PAUSED):
+        project.status = ProjectStatus.IN_PROGRESS
+        db.commit()
+        background_tasks.add_task(resume_project_run, project_id)
+
+    return {"status": "applied", "tasks_created": len(created_tasks), "task_titles": created_tasks}
 
 
 # ──────────────────────────────────────
@@ -948,11 +1197,15 @@ def get_settings_api(db: Session = Depends(get_db), user: dict = Depends(require
     worker_configs = db.query(WorkerConfig).all()
 
     slack_webhook = _get_setting(db, "slack_webhook", settings.slack_webhook_url)
+    # Return notion_api_key masked — just indicate if set
+    notion_key_raw = _get_setting(db, "notion_api_key", settings.notion_api_key)
+    notion_api_key = ("secret_" + "*" * 8) if notion_key_raw else ""
 
     return {
         "daily_budget": daily_budget,
         "project_budget": project_budget,
         "slack_webhook": slack_webhook,
+        "notion_api_key": notion_api_key,
         "models": [{
             "key": m.model_type.value,
             "enabled": m.enabled,
@@ -984,6 +1237,10 @@ async def update_settings_api(
         _set_setting(db, "project_budget_limit", str(body.project_budget))
     if body.slack_webhook is not None:
         _set_setting(db, "slack_webhook", body.slack_webhook)
+    if body.notion_api_key is not None:
+        # Only save if it's a real key (not the masked placeholder returned by GET)
+        if body.notion_api_key == "" or not body.notion_api_key.startswith("secret_****"):
+            _set_setting(db, "notion_api_key", body.notion_api_key)
 
     if body.models:
         for key, upd in body.models.items():
