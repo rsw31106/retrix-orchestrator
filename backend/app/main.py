@@ -55,6 +55,7 @@ def _migrate_schema():
         ("projects", "github_branch",   "ALTER TABLE projects ADD COLUMN github_branch VARCHAR(100) DEFAULT 'main'"),
         ("projects", "github_clone_url","ALTER TABLE projects ADD COLUMN github_clone_url VARCHAR(500) NULL"),
         ("projects", "workspace_path",  "ALTER TABLE projects ADD COLUMN workspace_path VARCHAR(500) NULL"),
+        ("projects", "archived",        "ALTER TABLE projects ADD COLUMN archived TINYINT(1) NOT NULL DEFAULT 0"),
         # tasks table
         ("tasks", "instruction", "ALTER TABLE tasks ADD COLUMN instruction TEXT NULL"),
         # worker_configs table
@@ -241,6 +242,7 @@ class WorkerConfigUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
     daily_budget: Optional[float] = None
     project_budget: Optional[float] = None
+    slack_webhook: Optional[str] = None
     models: Optional[dict[str, ModelConfigUpdate]] = None
     workers: Optional[dict[str, WorkerConfigUpdate]] = None
 
@@ -282,8 +284,13 @@ def change_password(body: PasswordChange, db: Session = Depends(get_db), user: d
 # Projects (protected)
 # ──────────────────────────────────────
 @app.get("/api/projects")
-def list_projects(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
-    projects = db.query(Project).order_by(Project.priority, Project.created_at.desc()).all()
+def list_projects(
+    archived: bool = Query(False),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    q = db.query(Project).filter(Project.archived == archived)
+    projects = q.order_by(Project.priority, Project.created_at.desc()).all()
     return [{
         "id": p.id,
         "name": p.name,
@@ -292,6 +299,7 @@ def list_projects(db: Session = Depends(get_db), user: dict = Depends(get_curren
         "progress": p.progress,
         "total_cost": p.total_cost,
         "priority": p.priority,
+        "archived": p.archived,
         "github_repo": p.github_repo,
         "workspace_path": p.workspace_path,
         "created_at": p.created_at.isoformat() if p.created_at else None,
@@ -459,6 +467,26 @@ def delete_project(project_id: int, db: Session = Depends(get_db), user: dict = 
     db.delete(project)
     db.commit()
     return {"status": "deleted"}
+
+
+@app.post("/api/projects/{project_id}/archive")
+def archive_project(project_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404)
+    project.archived = True
+    db.commit()
+    return {"status": "archived"}
+
+
+@app.post("/api/projects/{project_id}/unarchive")
+def unarchive_project(project_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404)
+    project.archived = False
+    db.commit()
+    return {"status": "unarchived"}
 
 
 # ──────────────────────────────────────
@@ -919,9 +947,12 @@ def get_settings_api(db: Session = Depends(get_db), user: dict = Depends(require
     model_configs = db.query(ModelConfig).all()
     worker_configs = db.query(WorkerConfig).all()
 
+    slack_webhook = _get_setting(db, "slack_webhook", settings.slack_webhook_url)
+
     return {
         "daily_budget": daily_budget,
         "project_budget": project_budget,
+        "slack_webhook": slack_webhook,
         "models": [{
             "key": m.model_type.value,
             "enabled": m.enabled,
@@ -951,6 +982,8 @@ async def update_settings_api(
         _set_setting(db, "daily_budget_limit", str(body.daily_budget))
     if body.project_budget is not None:
         _set_setting(db, "project_budget_limit", str(body.project_budget))
+    if body.slack_webhook is not None:
+        _set_setting(db, "slack_webhook", body.slack_webhook)
 
     if body.models:
         for key, upd in body.models.items():

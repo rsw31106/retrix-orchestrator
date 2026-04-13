@@ -87,6 +87,7 @@ class Project(Base):
 
     # 메타
     priority = Column(Integer, default=5)  # 1(highest) ~ 10(lowest)
+    archived = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

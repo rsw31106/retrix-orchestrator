@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import StatusBadge from '../components/StatusBadge'
-import { Activity, DollarSign, FolderOpen, CheckCircle, Cpu, Circle, AlertTriangle, Check, X } from 'lucide-react'
+import { Activity, DollarSign, FolderOpen, CheckCircle, Cpu, Circle, AlertTriangle, Check, X, Archive, ArchiveRestore } from 'lucide-react'
 
 const MODEL_OPTIONS = [
   { value: 'haiku',        label: 'Claude Haiku 4.5' },
@@ -116,30 +116,36 @@ function WorkerStatusPanel({ workers }) {
   )
 }
 
-function ProjectCard({ project }) {
+function ProjectCard({ project, onArchive }) {
   return (
-    <Link
-      to={`/projects/${project.id}`}
-      className="block bg-retrix-surface border border-retrix-border rounded-lg p-4 hover:border-retrix-accent/40 transition-all"
-    >
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-medium text-retrix-text text-sm truncate">{project.name}</h3>
-        <StatusBadge status={project.status} />
-      </div>
+    <div className="relative group bg-retrix-surface border border-retrix-border rounded-lg p-4 hover:border-retrix-accent/40 transition-all">
+      <button
+        onClick={(e) => { e.preventDefault(); onArchive(project.id, project.archived) }}
+        title={project.archived ? 'Unarchive' : 'Archive'}
+        className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-retrix-muted hover:text-retrix-text"
+      >
+        {project.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
+      </button>
+      <Link to={`/projects/${project.id}`} className="block">
+        <div className="flex items-center justify-between mb-3 pr-5">
+          <h3 className="font-medium text-retrix-text text-sm truncate">{project.name}</h3>
+          <StatusBadge status={project.status} />
+        </div>
 
-      {/* Progress bar */}
-      <div className="w-full h-1.5 bg-retrix-border rounded-full overflow-hidden mb-2">
-        <div
-          className="h-full bg-retrix-accent rounded-full transition-all duration-500"
-          style={{ width: `${project.progress || 0}%` }}
-        />
-      </div>
+        {/* Progress bar */}
+        <div className="w-full h-1.5 bg-retrix-border rounded-full overflow-hidden mb-2">
+          <div
+            className="h-full bg-retrix-accent rounded-full transition-all duration-500"
+            style={{ width: `${project.progress || 0}%` }}
+          />
+        </div>
 
-      <div className="flex items-center justify-between text-[11px] text-retrix-muted font-mono">
-        <span>{project.project_type?.replace('_', ' ')}</span>
-        <span>{Math.round(project.progress || 0)}% · {project.task_count} tasks</span>
-      </div>
-    </Link>
+        <div className="flex items-center justify-between text-[11px] text-retrix-muted font-mono">
+          <span>{project.project_type?.replace('_', ' ')}</span>
+          <span>{Math.round(project.progress || 0)}% · {project.task_count} tasks</span>
+        </div>
+      </Link>
+    </div>
   )
 }
 
@@ -149,10 +155,11 @@ export default function Dashboard({ subscribe }) {
   const [workers, setWorkers] = useState({})
   const [loading, setLoading] = useState(true)
   const [confirmations, setConfirmations] = useState([])
+  const [showArchived, setShowArchived] = useState(false)
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
-      const [sum, projs] = await Promise.all([api.summary(), api.listProjects()])
+      const [sum, projs] = await Promise.all([api.summary(), api.listProjects(showArchived)])
       setSummary(sum)
       setProjects(projs)
       setWorkers(sum?.workers || {})
@@ -161,7 +168,17 @@ export default function Dashboard({ subscribe }) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [showArchived])
+
+  const handleArchive = useCallback(async (id, isArchived) => {
+    try {
+      if (isArchived) await api.unarchiveProject(id)
+      else await api.archiveProject(id)
+      loadData()
+    } catch (e) {
+      console.error('Archive error:', e)
+    }
+  }, [loadData])
 
   const loadConfirmations = useCallback(async () => {
     try {
@@ -184,7 +201,7 @@ export default function Dashboard({ subscribe }) {
     loadConfirmations()
     const interval = setInterval(loadData, 10000)
     return () => clearInterval(interval)
-  }, [])
+  }, [loadData])
 
   // Real-time project updates
   useEffect(() => {
@@ -262,21 +279,32 @@ export default function Dashboard({ subscribe }) {
       <WorkerStatusPanel workers={workers} />
 
       {/* Project Grid */}
-      <div className="mb-4">
-        <h3 className="text-sm font-medium text-retrix-muted mb-3">Projects</h3>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-medium text-retrix-muted">
+          {showArchived ? 'Archived Projects' : 'Projects'}
+        </h3>
+        <button
+          onClick={() => setShowArchived(v => !v)}
+          className="flex items-center gap-1.5 text-xs text-retrix-muted hover:text-retrix-text transition-colors"
+        >
+          {showArchived ? <ArchiveRestore size={12} /> : <Archive size={12} />}
+          {showArchived ? 'Show Active' : 'Show Archived'}
+        </button>
       </div>
       {projects.length === 0 ? (
         <div className="text-center py-16 text-retrix-muted">
           <FolderOpen size={40} className="mx-auto mb-3 opacity-30" />
-          <p className="text-sm">No projects yet</p>
-          <Link to="/new" className="text-retrix-accent text-sm hover:underline">
-            Create your first project
-          </Link>
+          <p className="text-sm">{showArchived ? 'No archived projects' : 'No projects yet'}</p>
+          {!showArchived && (
+            <Link to="/new" className="text-retrix-accent text-sm hover:underline">
+              Create your first project
+            </Link>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           {projects.map((p) => (
-            <ProjectCard key={p.id} project={p} />
+            <ProjectCard key={p.id} project={p} onArchive={handleArchive} />
           ))}
         </div>
       )}

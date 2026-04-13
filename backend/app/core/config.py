@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     daily_budget_limit: float = 5.0
     project_budget_limit: float = 2.0
 
+    # Notifications
+    slack_webhook_url: str = ""
+
     @property
     def mysql_url(self) -> str:
         return (

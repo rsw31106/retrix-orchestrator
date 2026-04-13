@@ -14,6 +14,7 @@ from app.core.database import SessionLocal
 from app.core.redis_manager import RedisManager, async_redis
 import uuid
 from app.services.model_pool import model_pool, ModelCallError, ModelResponse
+from app.services.notifications import notify_project_completed, notify_project_failed, notify_budget_alert
 from app.models.models import (
     Project, Task, CostLog, ActivityLog, ProjectStatus, TaskStatus,
     ModelType, WorkerType,
@@ -207,6 +208,7 @@ async def _check_daily_budget_alert():
                 f"Daily spend ${total_today:.2f} has reached 80% of the ${daily_budget:.2f} daily budget",
                 {"total_today": total_today, "daily_budget": daily_budget, "threshold_pct": 80},
             )
+            await notify_budget_alert(total_today, daily_budget)
     except Exception as e:
         print(f"[DAILY BUDGET ALERT] {e}")
 
@@ -511,11 +513,22 @@ async def generate_instructions(state: ProjectState) -> ProjectState:
                 f"Task: {task.title}\nComplexity hint: {task.description[:200]}"
             )
 
+            # Include previous failure history so the PM can write a better instruction
+            previous_failures = ""
+            if task.fallback_history:
+                entries = task.fallback_history[-3:]  # last 3 attempts
+                lines = [
+                    f"  - Attempt {e.get('attempt', '?')}: [{e.get('worker', '?')}] {e.get('error', '')[:200]}"
+                    for e in entries
+                ]
+                previous_failures = "Previous Failures (avoid repeating these mistakes):\n" + "\n".join(lines)
+
             prompt = STAGE_GENERATE_INSTRUCTION.format(
                 task_title=task.title,
                 task_description=task.description,
                 worker_type=task.assigned_worker,
                 project_context=project_context[:2000],
+                previous_failures=previous_failures,
             )
 
             resp = await _call_with_confirmation(
@@ -698,6 +711,7 @@ async def review_results(state: ProjectState) -> ProjectState:
         if stage == "complete":
             await _log_activity("pm", "orchestrator", f"Project completed: {project.name}",
                                 {"progress": project.progress, "total_cost": project.total_cost}, project.id)
+            await notify_project_completed(project.name, project.id, project.total_cost, project.progress)
         elif stage == "fallback":
             await _log_activity("pm", "orchestrator", f"Project has failed tasks: {project.name}",
                                 {"progress": project.progress}, project.id)
@@ -732,6 +746,12 @@ async def handle_fallback(state: ProjectState) -> ProjectState:
                     f"Task held after {task.max_retries} failures: {task.title}",
                     {"project_id": state["project_id"], "task_id": task.id},
                 )
+                project_for_name = db.query(Project).get(state["project_id"])
+                if project_for_name:
+                    await notify_project_failed(
+                        project_for_name.name, state["project_id"],
+                        f"Task '{task.title}' held after {task.max_retries} failures",
+                    )
                 continue
 
             # Haiku decides fallback strategy

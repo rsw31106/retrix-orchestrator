@@ -133,7 +133,7 @@ Task: {task_title}
 Description: {task_description}
 Worker: {worker_type}
 Project Context: {project_context}
-
+{previous_failures}
 Respond with a detailed instruction document (not JSON, plain text with markdown).
 """
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
-import { DollarSign } from 'lucide-react'
+import { DollarSign, ChevronDown, ChevronRight } from 'lucide-react'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from 'recharts'
@@ -51,11 +51,13 @@ const CustomTooltip = ({ active, payload, label }) => {
 }
 
 export default function CostTracker() {
-  const [costs, setCosts]     = useState({})
-  const [history, setHistory] = useState([])
-  const [projects, setProjects] = useState([])
-  const [range, setRange]     = useState(14)
-  const [loading, setLoading] = useState(true)
+  const [costs, setCosts]         = useState({})
+  const [history, setHistory]     = useState([])
+  const [projects, setProjects]   = useState([])
+  const [projectCosts, setProjectCosts] = useState({})  // id -> {total, by_model}
+  const [expandedProject, setExpandedProject] = useState(null)
+  const [range, setRange]         = useState(14)
+  const [loading, setLoading]     = useState(true)
 
   useEffect(() => {
     const load = async () => {
@@ -68,6 +70,14 @@ export default function CostTracker() {
         setCosts(c)
         setProjects(p)
         setHistory(h)
+        // Fetch per-project cost breakdown
+        const pcMap = {}
+        await Promise.all(p.map(async (proj) => {
+          try {
+            pcMap[proj.id] = await api.projectCosts(proj.id)
+          } catch {}
+        }))
+        setProjectCosts(pcMap)
       } catch (e) {
         console.error(e)
       } finally {
@@ -226,15 +236,43 @@ export default function CostTracker() {
         {projects.length === 0 ? (
           <p className="text-sm text-retrix-muted py-4 text-center">No projects</p>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-1">
             {projects
               .sort((a, b) => (b.total_cost || 0) - (a.total_cost || 0))
-              .map((p) => (
-                <div key={p.id} className="flex items-center justify-between py-1.5 border-b border-retrix-border/50 last:border-0">
-                  <span className="text-sm text-retrix-text">{p.name}</span>
-                  <span className="text-sm font-mono text-retrix-muted">${(p.total_cost || 0).toFixed(4)}</span>
-                </div>
-              ))}
+              .map((p) => {
+                const pc = projectCosts[p.id] || {}
+                const byModel = Object.entries(pc.by_model || {}).sort(([, a], [, b]) => b - a)
+                const isOpen = expandedProject === p.id
+                return (
+                  <div key={p.id} className="border-b border-retrix-border/50 last:border-0">
+                    <button
+                      onClick={() => setExpandedProject(isOpen ? null : p.id)}
+                      className="w-full flex items-center justify-between py-2 hover:text-retrix-text text-left"
+                    >
+                      <div className="flex items-center gap-1.5 text-sm text-retrix-text">
+                        {byModel.length > 0
+                          ? (isOpen ? <ChevronDown size={12} className="text-retrix-muted" /> : <ChevronRight size={12} className="text-retrix-muted" />)
+                          : <span className="w-3" />}
+                        {p.name}
+                      </div>
+                      <span className="text-sm font-mono text-retrix-muted">${(p.total_cost || 0).toFixed(4)}</span>
+                    </button>
+                    {isOpen && byModel.length > 0 && (
+                      <div className="pb-2 pl-5 space-y-1">
+                        {byModel.map(([model, cost]) => (
+                          <div key={model} className="flex items-center justify-between text-xs">
+                            <span className="flex items-center gap-1.5 text-retrix-muted">
+                              <span className="w-2 h-2 rounded-full inline-block" style={{ backgroundColor: MODEL_COLORS[model] || '#6366f1' }} />
+                              {MODEL_LABELS[model] || model}
+                            </span>
+                            <span className="font-mono text-retrix-muted">${cost.toFixed(4)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
           </div>
         )}
       </div>

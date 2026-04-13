@@ -38,12 +38,14 @@ export const api = {
   workerStatus: () => fetchApi('/workers/status'),
 
   // Projects
-  listProjects: () => fetchApi('/projects'),
+  listProjects: (archived = false) => fetchApi(`/projects?archived=${archived}`),
   getProject: (id) => fetchApi(`/projects/${id}`),
   createProject: (data) => fetchApi('/projects', { method: 'POST', body: JSON.stringify(data) }),
   pauseProject: (id) => fetchApi(`/projects/${id}/pause`, { method: 'POST' }),
   resumeProject: (id) => fetchApi(`/projects/${id}/resume`, { method: 'POST' }),
   deleteProject: (id) => fetchApi(`/projects/${id}`, { method: 'DELETE' }),
+  archiveProject: (id) => fetchApi(`/projects/${id}/archive`, { method: 'POST' }),
+  unarchiveProject: (id) => fetchApi(`/projects/${id}/unarchive`, { method: 'POST' }),
 
   // Tasks
   retryTask: (id, body = {}) => fetchApi(`/tasks/${id}/retry`, { method: 'POST', body: JSON.stringify(body) }),

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Save, Cpu, Users, Loader2, CheckCircle, AlertCircle } from 'lucide-react'
+import { Save, Cpu, Users, Loader2, CheckCircle, AlertCircle, Bell } from 'lucide-react'
 import { api } from '../lib/api'
 
 function Toggle({ checked, onChange }) {
@@ -26,6 +26,7 @@ export default function Settings() {
 
   const [dailyBudget, setDailyBudget] = useState('')
   const [projectBudget, setProjectBudget] = useState('')
+  const [slackWebhook, setSlackWebhook] = useState('')
   const [models, setModels] = useState({})
   const [workers, setWorkers] = useState({})
 
@@ -34,6 +35,7 @@ export default function Settings() {
       .then((data) => {
         setDailyBudget(data.daily_budget ?? '')
         setProjectBudget(data.project_budget ?? '')
+        setSlackWebhook(data.slack_webhook ?? '')
         // Index models/workers by key
         const mMap = {}
         ;(data.models || []).forEach((m) => { mMap[m.key] = m })
@@ -75,6 +77,7 @@ export default function Settings() {
       await api.updateSettings({
         daily_budget: dailyBudget === '' ? null : parseFloat(dailyBudget),
         project_budget: projectBudget === '' ? null : parseFloat(projectBudget),
+        slack_webhook: slackWebhook || null,
         models: modelsPayload,
         workers: workersPayload,
       })
@@ -203,6 +206,27 @@ export default function Settings() {
               </div>
             )
           })}
+        </div>
+      </div>
+
+      {/* Notifications */}
+      <div className="bg-retrix-surface border border-retrix-border rounded-lg p-4 mb-4">
+        <div className="flex items-center gap-2 mb-4">
+          <Bell size={14} className="text-retrix-warning" />
+          <h3 className="text-xs font-medium text-retrix-muted uppercase tracking-wider">Notifications</h3>
+        </div>
+        <div>
+          <label className="block text-xs text-retrix-muted mb-1.5">Slack Webhook URL</label>
+          <input
+            type="url"
+            placeholder="https://hooks.slack.com/services/..."
+            value={slackWebhook}
+            onChange={(e) => setSlackWebhook(e.target.value)}
+            className="w-full bg-retrix-bg border border-retrix-border rounded-md px-3 py-2 text-sm text-retrix-text focus:outline-none focus:border-retrix-accent font-mono"
+          />
+          <p className="text-[11px] text-retrix-muted mt-1.5">
+            Notified on: project complete, project failed, 80% daily budget
+          </p>
         </div>
       </div>
 
