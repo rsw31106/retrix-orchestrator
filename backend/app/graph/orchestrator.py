@@ -70,6 +70,7 @@ def _log_cost(db: Session, project_id: int, task_id: int, resp: ModelResponse, s
 # Fallback model chain: if model[i] fails, suggest model[i+1]
 FALLBACK_MODEL_CHAIN = ["haiku", "gpt_4o_mini", "deepseek_v3", "deepseek_v4", "gpt_4o"]
 CONFIRMATION_TIMEOUT_SECS = 300  # 5 minutes
+ANALYSIS_APPROVAL_TIMEOUT_SECS = 600  # 10 minutes
 
 
 async def _request_model_switch_confirmation(
@@ -176,6 +177,146 @@ async def _call_with_confirmation(
                 {"failed_model": model}, project_id, task_id,
             )
             raise
+
+
+async def _request_analysis_approval(project_id: int, analysis: dict) -> bool:
+    """Publish an analysis review request and wait for user approval.
+    Returns True if approved, False if denied or timed out."""
+    conf_id = str(uuid.uuid4())[:8]
+
+    data = {
+        "id": conf_id,
+        "confirmation_type": "analysis_review",
+        "project_id": project_id,
+        "summary": analysis.get("summary", ""),
+        "project_type": analysis.get("project_type", ""),
+        "tasks_estimate": analysis.get("estimated_tasks", analysis.get("task_count", "?")),
+        "key_requirements": (analysis.get("key_requirements") or analysis.get("tech_requirements") or [])[:10],
+        "risks": (analysis.get("risks") or [])[:5],
+        "complexity": str(analysis.get("complexity", "")),
+        "tech_stack": (analysis.get("tech_stack") or analysis.get("tech_requirements") or []),
+        "full_analysis": analysis,
+        "feedback_history": [],
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+    await async_redis.hset("retrix:confirmations", conf_id, json.dumps(data))
+    await RedisManager.publish_event(
+        RedisManager.CHANNEL_CONFIRMATION,
+        "confirmation_request",
+        data,
+    )
+    await _log_activity(
+        "pm", "orchestrator",
+        "Waiting for user approval before task decomposition",
+        {"summary": str(analysis.get("summary", ""))[:200]},
+        project_id,
+    )
+
+    response_key = f"retrix:confirmation:{conf_id}:response"
+    for _ in range(ANALYSIS_APPROVAL_TIMEOUT_SECS):
+        response = await async_redis.get(response_key)
+        if response:
+            await async_redis.hdel("retrix:confirmations", conf_id)
+            await async_redis.delete(response_key)
+            return response.startswith("approve:")
+        await asyncio.sleep(1)
+
+    # Timed out
+    await async_redis.hdel("retrix:confirmations", conf_id)
+    await RedisManager.publish_alert(
+        "warning",
+        "Analysis approval timed out — project paused",
+        {"conf_id": conf_id, "project_id": project_id},
+    )
+    return False
+
+
+async def revise_analysis_with_feedback(
+    conf_id: str,
+    project_id: int,
+    current_analysis: dict,
+    user_message: str,
+    feedback_history: list,
+) -> dict:
+    """
+    PM revises the analysis based on user feedback.
+    Called from the REST endpoint; publishes updated analysis via WebSocket.
+    Returns the revised analysis dict.
+    """
+    from app.core.database import SessionLocal as _SL
+    from app.models.models import Project as _Project
+
+    # Fetch spec document for context
+    db = _SL()
+    try:
+        project = db.query(_Project).get(project_id)
+        spec_document = project.spec_document or ""
+    finally:
+        db.close()
+
+    # Build conversation history for the PM
+    history_text = ""
+    for entry in feedback_history:
+        role = "User" if entry["role"] == "user" else "PM"
+        history_text += f"\n{role}: {entry['content']}"
+
+    prompt = f"""You previously analyzed a project specification and produced an analysis.
+The user has reviewed it and is providing feedback. Please revise the analysis to incorporate their request.
+
+Original Spec (excerpt):
+{spec_document[:3000]}
+
+Current Analysis:
+{json.dumps(current_analysis, ensure_ascii=False, indent=2)}
+
+Conversation so far:{history_text}
+
+User (latest feedback): {user_message}
+
+Revise the analysis JSON to incorporate this feedback. Keep the same JSON schema.
+Respond ONLY with the revised JSON — no extra text."""
+
+    selected_model = await haiku_select_model("analyze_spec", spec_document)
+    resp = await model_pool.call(
+        model=selected_model,
+        system_prompt=get_pm_system_prompt(),
+        user_prompt=prompt,
+        max_tokens=4096,
+        temperature=0.3,
+    )
+
+    revised = _parse_json_response(resp.content)
+
+    # Update Redis confirmation data with revised analysis
+    raw = await async_redis.hget("retrix:confirmations", conf_id)
+    if raw:
+        conf_data = json.loads(raw)
+        conf_data.update({
+            "summary": revised.get("summary", revised.get("features", [""])[0] if revised.get("features") else ""),
+            "project_type": revised.get("project_type", conf_data.get("project_type", "")),
+            "tasks_estimate": revised.get("estimated_tasks", revised.get("task_count", conf_data.get("tasks_estimate", "?"))),
+            "key_requirements": (revised.get("key_requirements") or revised.get("tech_requirements") or [])[:10],
+            "risks": (revised.get("risks") or [])[:5],
+            "complexity": str(revised.get("complexity", conf_data.get("complexity", ""))),
+            "tech_stack": (revised.get("tech_stack") or revised.get("tech_requirements") or []),
+            "full_analysis": revised,
+        })
+        await async_redis.hset("retrix:confirmations", conf_id, json.dumps(conf_data))
+
+        # Publish update so all open frontends refresh the panel
+        await RedisManager.publish_event(
+            RedisManager.CHANNEL_CONFIRMATION,
+            "analysis_updated",
+            conf_data,
+        )
+
+    await _log_activity(
+        "pm", selected_model,
+        f"Analysis revised based on user feedback: {user_message[:100]}",
+        None, project_id,
+    )
+    return revised
 
 
 async def _check_daily_budget_alert():
@@ -314,14 +455,32 @@ async def dispatch_single_task(task_id: int):
 
 
 def _parse_json_response(content: str) -> dict:
-    """Extract JSON from model response, handling markdown fences."""
+    """Extract JSON from model response, handling markdown fences and surrounding text."""
     content = content.strip()
-    if content.startswith("```"):
+
+    # Strip markdown code fences
+    if "```" in content:
         lines = content.split("\n")
-        # Remove first and last fence lines
         lines = [l for l in lines if not l.strip().startswith("```")]
-        content = "\n".join(lines)
-    return json.loads(content)
+        content = "\n".join(lines).strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    # Extract first {...} or [...] block from response
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        start = content.find(start_char)
+        end = content.rfind(end_char)
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(content[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+    raise ValueError(f"No valid JSON found in response: {content[:200]}")
 
 
 # ──────────────────────────────────────
@@ -360,9 +519,18 @@ Respond with ONLY the model name, nothing else."""
 # Node: Analyze Spec
 # ──────────────────────────────────────
 async def analyze_spec(state: ProjectState) -> ProjectState:
+    analysis = None
     db = SessionLocal()
     try:
         project = db.query(Project).get(state["project_id"])
+
+        # Skip re-analysis if already done (was previously approved) — go straight to decompose
+        if project.analysis_result:
+            await RedisManager.publish_project_update(
+                project.id, {"status": "analyzed", "analysis": project.analysis_result, "model_used": "cached"}
+            )
+            return {**state, "stage": "decompose", "analysis": project.analysis_result, "error": None}
+
         project.status = ProjectStatus.ANALYZING
         db.commit()
 
@@ -386,28 +554,58 @@ async def analyze_spec(state: ProjectState) -> ProjectState:
         _log_cost(db, project.id, None, resp, "analysis")
 
         analysis = _parse_json_response(resp.content)
-        project.analysis_result = analysis
+        # Save analysis_result only AFTER user approves (below) — don't cache pre-approval
         pt_val = analysis.get("project_type")
         if pt_val:
             from app.models.models import ProjectType
             try:
                 project.project_type = ProjectType(pt_val)
+                db.commit()
             except ValueError:
-                pass  # keep existing value if unknown
-        db.commit()
+                pass
 
         await RedisManager.publish_project_update(
-            project.id, {"status": "analyzed", "analysis": analysis, "model_used": selected_model}
+            project.id, {"status": "awaiting_approval", "analysis": analysis, "model_used": selected_model}
         )
-        await _log_activity("pm", selected_model, "Spec analyzed", {"project_type": pt_val}, project.id)
-
-        return {**state, "stage": "decompose", "analysis": analysis, "error": None}
+        await _log_activity("pm", selected_model, "Spec analyzed — awaiting user approval", {"project_type": pt_val}, project.id)
 
     except Exception as e:
         await RedisManager.publish_alert("error", f"Spec analysis failed: {e}", {"project_id": state["project_id"]})
         return {**state, "stage": "fallback", "error": str(e)}
     finally:
         db.close()
+
+    # ── Wait for user to review and approve the analysis ──
+    approved = await _request_analysis_approval(state["project_id"], analysis)
+
+    if approved:
+        # Save analysis to DB now that user approved it
+        db2 = SessionLocal()
+        try:
+            proj2 = db2.query(Project).get(state["project_id"])
+            if proj2:
+                proj2.analysis_result = analysis
+                db2.commit()
+        finally:
+            db2.close()
+        await _log_activity("pm", "orchestrator", "Analysis approved — proceeding to decompose", None, state["project_id"])
+        return {**state, "stage": "decompose", "analysis": analysis, "error": None}
+    else:
+        # Rejected or timed out — pause so user can edit spec and resume
+        db2 = SessionLocal()
+        try:
+            proj2 = db2.query(Project).get(state["project_id"])
+            if proj2:
+                proj2.status = ProjectStatus.PAUSED
+                proj2.analysis_result = None
+                db2.commit()
+        finally:
+            db2.close()
+        await RedisManager.publish_project_update(
+            state["project_id"], {"status": "paused", "message": "Analysis rejected — edit spec and resume to re-analyze"}
+        )
+        await _log_activity("pm", "orchestrator", "Analysis rejected by user — project paused", None, state["project_id"])
+        return {**state, "stage": "complete", "analysis": analysis, "error": None}
 
 
 # ──────────────────────────────────────
@@ -416,6 +614,15 @@ async def analyze_spec(state: ProjectState) -> ProjectState:
 async def decompose_tasks(state: ProjectState) -> ProjectState:
     db = SessionLocal()
     try:
+        # Guard: never decompose twice — if tasks already exist, skip straight to instruct
+        existing = db.query(Task).filter(Task.project_id == state["project_id"]).count()
+        if existing > 0:
+            await RedisManager.publish_project_update(
+                state["project_id"], {"message": f"Tasks already exist ({existing}), skipping decomposition"}
+            )
+            await _log_activity("pm", "orchestrator", f"Decompose skipped — {existing} tasks already exist", None, state["project_id"])
+            return {**state, "stage": "instruct", "tasks": [], "error": None}
+
         project = db.query(Project).get(state["project_id"])
         project.status = ProjectStatus.PLANNING
         db.commit()
@@ -581,10 +788,24 @@ async def dispatch_workers(state: ProjectState) -> ProjectState:
             Task.status == TaskStatus.ASSIGNED,
         ).order_by(Task.order).all()
 
-        task_dicts = [
-            {"id": t.id, "dependencies": t.dependencies or []}
-            for t in tasks
-        ]
+        # Build name→id map from ALL project tasks so string deps can be resolved to IDs
+        all_tasks = db.query(Task).filter(Task.project_id == project_id).all()
+        name_to_id = {t.title: t.id for t in all_tasks}
+        assigned_ids = {t.id for t in tasks}
+
+        task_dicts = []
+        for t in tasks:
+            resolved_deps = []
+            for dep in (t.dependencies or []):
+                if isinstance(dep, int):
+                    dep_id = dep
+                else:
+                    dep_id = name_to_id.get(dep)
+                # Only add as ordering constraint if the dep is also being dispatched now
+                # (already-completed deps don't need ordering)
+                if dep_id and dep_id in assigned_ids:
+                    resolved_deps.append(dep_id)
+            task_dicts.append({"id": t.id, "dependencies": resolved_deps})
     finally:
         db.close()
 
@@ -628,6 +849,23 @@ async def dispatch_workers(state: ProjectState) -> ProjectState:
                 _dispatch_task(project_id, t["id"], workspace)
                 for t in phase
             ])
+
+            # Stop if any task in this phase failed — don't run dependent phases
+            phase_ids = [t["id"] for t in phase]
+            db2 = SessionLocal()
+            try:
+                failed_in_phase = db2.query(Task).filter(
+                    Task.id.in_(phase_ids),
+                    Task.status == TaskStatus.FAILED,
+                ).count()
+            finally:
+                db2.close()
+            if failed_in_phase:
+                await _log_activity("pm", "orchestrator",
+                                    f"Phase stopped: {failed_in_phase} task(s) failed — routing to fallback",
+                                    None, project_id)
+                return {**state, "stage": "fallback", "error": None}
+
     except Exception as e:
         return {**state, "stage": "fallback", "error": str(e)}
 
@@ -640,6 +878,18 @@ async def dispatch_workers(state: ProjectState) -> ProjectState:
 async def review_results(state: ProjectState) -> ProjectState:
     db = SessionLocal()
     try:
+        # Also pick up tasks that went directly to FAILED (worker exit_code != 0)
+        # without going through REVIEW status
+        direct_failed = db.query(Task).filter(
+            Task.project_id == state["project_id"],
+            Task.status == TaskStatus.FAILED,
+        ).count()
+        if direct_failed:
+            await _log_activity("pm", "orchestrator",
+                                f"{direct_failed} task(s) failed directly — routing to fallback",
+                                None, state["project_id"])
+            return {**state, "stage": "fallback", "error": None}
+
         tasks = db.query(Task).filter(
             Task.project_id == state["project_id"],
             Task.status == TaskStatus.REVIEW,
@@ -781,8 +1031,9 @@ async def handle_fallback(state: ProjectState) -> ProjectState:
             history.append({
                 "attempt": task.retry_count + 1,
                 "action": action,
-                "from_worker": task.assigned_worker,
+                "worker": task.assigned_worker,
                 "to_worker": decision.get("target_worker"),
+                "error": task.error_message or state.get("error", ""),
                 "reason": decision.get("reason"),
                 "timestamp": datetime.utcnow().isoformat(),
             })
@@ -790,16 +1041,18 @@ async def handle_fallback(state: ProjectState) -> ProjectState:
             task.retry_count += 1
 
             if action == "retry":
-                task.status = TaskStatus.ASSIGNED
+                # Reset to PENDING so instruct node regenerates instruction with failure context
+                task.status = TaskStatus.PENDING
                 task.error_message = None
             elif action == "fallback":
                 task.assigned_worker = decision.get("target_worker", task.assigned_worker)
-                task.status = TaskStatus.ASSIGNED
+                # Reset to PENDING so instruct node picks correct worker's instruction style
+                task.status = TaskStatus.PENDING
                 task.error_message = None
                 if decision.get("modified_instruction"):
                     task.instruction = decision["modified_instruction"]
             elif action == "escalate":
-                task.status = TaskStatus.ASSIGNED
+                task.status = TaskStatus.PENDING
                 if decision.get("modified_instruction"):
                     task.instruction = decision["modified_instruction"]
             else:  # hold
@@ -820,10 +1073,20 @@ async def handle_fallback(state: ProjectState) -> ProjectState:
         # Check if any tasks still need processing
         pending = db.query(Task).filter(
             Task.project_id == state["project_id"],
-            Task.status.in_([TaskStatus.ASSIGNED, TaskStatus.PENDING]),
+            Task.status == TaskStatus.PENDING,
+        ).count()
+        assigned = db.query(Task).filter(
+            Task.project_id == state["project_id"],
+            Task.status == TaskStatus.ASSIGNED,
         ).count()
 
-        next_stage = "dispatch" if pending > 0 else "complete"
+        if pending > 0:
+            # PENDING tasks need instruction regeneration (with failure context)
+            next_stage = "instruct"
+        elif assigned > 0:
+            next_stage = "dispatch"
+        else:
+            next_stage = "complete"
         return {**state, "stage": next_stage, "fallback_count": state.get("fallback_count", 0) + 1, "error": None}
 
     except Exception as e:
@@ -935,12 +1198,21 @@ async def resume_project_run(project_id: int):
             Task.status == TaskStatus.IN_PROGRESS,
         ).count()
 
-        if assigned_count > 0 or in_progress_count > 0:
+        failed_count = db.query(Task).filter(
+            Task.project_id == project_id,
+            Task.status == TaskStatus.FAILED,
+        ).count()
+
+        if not project.analysis_result:
+            # Analysis never completed — restart from the beginning
+            resume_stage = "analyze"
+        elif assigned_count > 0 or in_progress_count > 0:
             resume_stage = "dispatch"
         elif pending_count > 0:
             resume_stage = "instruct"
+        elif failed_count > 0:
+            resume_stage = "fallback"
         else:
-            # All tasks are completed/failed/held — go to review to update progress
             resume_stage = "review"
 
     finally:

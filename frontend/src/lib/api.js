@@ -79,12 +79,17 @@ export const api = {
     body: JSON.stringify({ messages, project_id: projectId }),
   }),
 
-  // Model switch confirmations
+  // Confirmations (model switch + analysis review)
   listConfirmations: () => fetchApi('/confirmations'),
   respondConfirmation: (id, approved, model = null) =>
     fetchApi(`/confirmations/${id}/respond`, {
       method: 'POST',
       body: JSON.stringify({ approved, model }),
+    }),
+  analysisFeedback: (id, message) =>
+    fetchApi(`/confirmations/${id}/feedback`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
     }),
 
   // Activity log

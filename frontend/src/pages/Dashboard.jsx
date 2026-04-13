@@ -2,71 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import StatusBadge from '../components/StatusBadge'
-import { Activity, DollarSign, FolderOpen, CheckCircle, Cpu, Circle, AlertTriangle, Check, X, Archive, ArchiveRestore } from 'lucide-react'
-
-const MODEL_OPTIONS = [
-  { value: 'haiku',        label: 'Claude Haiku 4.5' },
-  { value: 'gpt_4o_mini',  label: 'GPT-4o Mini' },
-  { value: 'deepseek_v3',  label: 'DeepSeek V3' },
-  { value: 'deepseek_v4',  label: 'DeepSeek V4' },
-  { value: 'gpt_4o',       label: 'GPT-4o' },
-]
-
-function ConfirmationPanel({ confirmations, onRespond }) {
-  const [selectedModels, setSelectedModels] = useState({})
-
-  if (confirmations.length === 0) return null
-
-  const getModel = (conf) => selectedModels[conf.id] ?? conf.suggested_model
-
-  return (
-    <div className="mb-6">
-      <h3 className="text-xs font-medium text-retrix-warning uppercase tracking-wider mb-2 flex items-center gap-2">
-        <AlertTriangle size={12} /> Model Switch Required ({confirmations.length})
-      </h3>
-      <div className="space-y-3">
-        {confirmations.map((conf) => (
-          <div key={conf.id} className="bg-retrix-surface border border-retrix-warning/40 rounded-lg p-4">
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-retrix-text">
-                  <span className="font-mono text-retrix-warning">{conf.current_model}</span>
-                  {' '}failed during{' '}
-                  <span className="font-mono text-retrix-accent">{conf.stage}</span>
-                  {conf.task_id && <span className="text-retrix-muted"> (task #{conf.task_id})</span>}
-                </p>
-                <p className="text-xs text-retrix-muted mt-1 font-mono break-all">{conf.reason}</p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <select
-                  value={getModel(conf)}
-                  onChange={e => setSelectedModels(prev => ({ ...prev, [conf.id]: e.target.value }))}
-                  className="bg-retrix-bg border border-retrix-border rounded px-2 py-1 text-xs text-retrix-text focus:outline-none focus:border-retrix-accent"
-                >
-                  {MODEL_OPTIONS.map(m => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-                <button
-                  onClick={() => onRespond(conf.id, true, getModel(conf))}
-                  className="flex items-center gap-1 px-3 py-1 bg-retrix-success/10 text-retrix-success text-xs rounded hover:bg-retrix-success/20"
-                >
-                  <Check size={12} /> Approve
-                </button>
-                <button
-                  onClick={() => onRespond(conf.id, false)}
-                  className="flex items-center gap-1 px-3 py-1 bg-retrix-danger/10 text-retrix-danger text-xs rounded hover:bg-retrix-danger/20"
-                >
-                  <X size={12} /> Deny
-                </button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
+import { Activity, DollarSign, FolderOpen, CheckCircle, Cpu, Circle, Archive, ArchiveRestore } from 'lucide-react'
 
 function StatCard({ icon: Icon, label, value, sub, color }) {
   return (
@@ -154,7 +90,6 @@ export default function Dashboard({ subscribe }) {
   const [projects, setProjects] = useState([])
   const [workers, setWorkers] = useState({})
   const [loading, setLoading] = useState(true)
-  const [confirmations, setConfirmations] = useState([])
   const [showArchived, setShowArchived] = useState(false)
 
   const loadData = useCallback(async () => {
@@ -180,25 +115,8 @@ export default function Dashboard({ subscribe }) {
     }
   }, [loadData])
 
-  const loadConfirmations = useCallback(async () => {
-    try {
-      const items = await api.listConfirmations()
-      setConfirmations(items)
-    } catch {}
-  }, [])
-
-  const handleRespond = useCallback(async (id, approved, model = null) => {
-    try {
-      await api.respondConfirmation(id, approved, model)
-      setConfirmations(prev => prev.filter(c => c.id !== id))
-    } catch (e) {
-      console.error('Confirmation response error:', e)
-    }
-  }, [])
-
   useEffect(() => {
     loadData()
-    loadConfirmations()
     const interval = setInterval(loadData, 10000)
     return () => clearInterval(interval)
   }, [loadData])
@@ -216,19 +134,6 @@ export default function Dashboard({ subscribe }) {
       if (msg.type === 'worker_update') {
         const { worker, ...info } = msg.data
         setWorkers(prev => ({ ...prev, [worker]: info }))
-      }
-    })
-  }, [subscribe])
-
-  // Real-time confirmation requests
-  useEffect(() => {
-    return subscribe('dashboard-confirmations', (msg) => {
-      if (msg.type === 'confirmation_request') {
-        setConfirmations(prev => {
-          // Avoid duplicate if already in list
-          if (prev.find(c => c.id === msg.data.id)) return prev
-          return [...prev, msg.data]
-        })
       }
     })
   }, [subscribe])
@@ -271,9 +176,6 @@ export default function Dashboard({ subscribe }) {
           color="retrix-warning"
         />
       </div>
-
-      {/* Model Switch Confirmations */}
-      <ConfirmationPanel confirmations={confirmations} onRespond={handleRespond} />
 
       {/* Worker Status */}
       <WorkerStatusPanel workers={workers} />

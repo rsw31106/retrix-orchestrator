@@ -67,7 +67,7 @@ class Project(Base):
     progress = Column(Float, default=0.0)  # 0.0 ~ 100.0
 
     # 기획서 원문
-    spec_document = Column(Text, nullable=True)
+    spec_document = Column(Text(length=4294967295), nullable=True)  # LONGTEXT
     # PM이 분석한 결과
     analysis_result = Column(JSON, nullable=True)
     # PM이 세운 계획

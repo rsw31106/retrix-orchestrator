@@ -13,7 +13,9 @@ import PMChat from './pages/PMChat'
 import ActivityLog from './pages/ActivityLog'
 import Login from './pages/Login'
 import AlertBanner from './components/AlertBanner'
-import { useState, useEffect } from 'react'
+import ConfirmationPanel from './components/ConfirmationPanel'
+import { api } from './lib/api'
+import { useState, useEffect, useCallback } from 'react'
 
 function ProtectedLayout({ children, connected, onLogout }) {
   return (
@@ -30,6 +32,7 @@ export default function App() {
   const [authed, setAuthed] = useState(isLoggedIn())
   const { connected, subscribe } = useWebSocket()
   const [alerts, setAlerts] = useState([])
+  const [confirmations, setConfirmations] = useState([])
 
   useEffect(() => {
     if (!authed) return
@@ -39,6 +42,37 @@ export default function App() {
       }
     })
   }, [subscribe, authed])
+
+  // Load pending confirmations on mount and listen for new ones globally
+  useEffect(() => {
+    if (!authed) return
+    api.listConfirmations().then(setConfirmations).catch(() => {})
+  }, [authed])
+
+  useEffect(() => {
+    if (!authed) return
+    return subscribe('global-confirmations', (msg) => {
+      if (msg.type === 'confirmation_request') {
+        setConfirmations(prev => {
+          if (prev.find(c => c.id === msg.data.id)) return prev
+          return [...prev, msg.data]
+        })
+      } else if (msg.type === 'analysis_updated') {
+        setConfirmations(prev =>
+          prev.map(c => c.id === msg.data.id ? { ...c, ...msg.data } : c)
+        )
+      }
+    })
+  }, [subscribe, authed])
+
+  const handleConfirmationRespond = useCallback(async (id, approved, model = null) => {
+    try {
+      await api.respondConfirmation(id, approved, model)
+      setConfirmations(prev => prev.filter(c => c.id !== id))
+    } catch (e) {
+      console.error('Confirmation response error:', e)
+    }
+  }, [])
 
   const handleLogout = () => {
     clearToken()
@@ -58,6 +92,9 @@ export default function App() {
 
   return (
     <ProtectedLayout connected={connected} onLogout={handleLogout}>
+      {/* Global Model Switch Confirmations */}
+      <ConfirmationPanel confirmations={confirmations} onRespond={handleConfirmationRespond} />
+
       {/* Alerts */}
       {alerts.length > 0 && (
         <div className="sticky top-0 z-50 -mx-6 -mt-6 mb-4">

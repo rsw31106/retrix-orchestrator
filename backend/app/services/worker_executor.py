@@ -130,19 +130,20 @@ async def invoke_claude_code(instruction: str, workspace: str, timeout: int = DE
     if not shutil.which("claude"):
         return -1, "", "claude CLI not found on PATH. Install with: winget install Anthropic.ClaudeCode"
 
-    cmd = ["claude", "-p", instruction]
+    cmd = ["claude", "-p", instruction, "--dangerously-skip-permissions"]
     return await _run_subprocess(cmd, cwd=workspace, timeout=timeout)
 
 
 async def invoke_codex(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
     """
-    OpenAI Codex CLI: codex -q "<instruction>"
+    OpenAI Codex CLI: codex --approval-mode full-auto "<instruction>"
     Requires 'codex' to be on PATH (npm install -g @openai/codex).
     """
     if not shutil.which("codex"):
         return -1, "", "codex CLI not found on PATH. Install with: npm install -g @openai/codex"
 
-    cmd = ["codex", "-q", instruction]
+    codex_bin = shutil.which("codex")
+    cmd = ["cmd", "/c", codex_bin, "exec", "--full-auto", instruction]
     return await _run_subprocess(cmd, cwd=workspace, timeout=timeout)
 
 
@@ -174,7 +175,10 @@ async def invoke_cursor(instruction: str, workspace: str, timeout: int = DEFAULT
             "Install with: irm 'https://cursor.com/install?win32=true' | iex"
         )
 
-    cmd = [agent_bin, "-p", instruction, "--yolo"]
+    # On Windows, .cmd files must be invoked via cmd /c for correct arg passing.
+    # --trust and -f both bypass workspace trust prompt; place before -p so they
+    # are processed before the headless mode flag.
+    cmd = ["cmd", "/c", agent_bin, "--trust", "-f", "-p", instruction, "--yolo"]
     return await _run_subprocess(cmd, cwd=workspace, timeout=timeout)
 
 

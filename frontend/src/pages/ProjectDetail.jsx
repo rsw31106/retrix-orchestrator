@@ -10,12 +10,13 @@ import {
 import clsx from 'clsx'
 
 const STAGE_LABELS = {
-  analyzing:   { text: 'Analyzing spec document…',       active: true },
-  planning:    { text: 'Decomposing into tasks…',         active: true },
-  in_progress: { text: 'Generating instructions & dispatching workers…', active: true },
-  paused:      { text: 'Paused',                          active: false },
-  completed:   { text: 'All tasks completed',             active: false },
-  failed:      { text: 'One or more tasks failed',        active: false },
+  analyzing:          { text: 'Analyzing spec document…',                       active: true },
+  awaiting_approval:  { text: 'Analysis complete — waiting for your approval…', active: true },
+  planning:           { text: 'Decomposing into tasks…',                         active: true },
+  in_progress:        { text: 'Generating instructions & dispatching workers…',  active: true },
+  paused:             { text: 'Paused',                                           active: false },
+  completed:          { text: 'All tasks completed',                              active: false },
+  failed:             { text: 'One or more tasks failed',                         active: false },
 }
 
 function OrchestrationBanner({ status }) {
@@ -466,7 +467,7 @@ export default function ProjectDetail({ subscribe }) {
               <Pause size={12} /> Pause
             </button>
           )}
-          {project.status === 'paused' && (
+          {(project.status === 'paused' || project.status === 'analyzing') && (
             <button onClick={handleResume} className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-retrix-success/10 text-retrix-success rounded-md hover:bg-retrix-success/20">
               <Play size={12} /> Resume
             </button>

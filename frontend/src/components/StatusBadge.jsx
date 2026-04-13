@@ -3,6 +3,7 @@ import clsx from 'clsx'
 const statusStyles = {
   queued: 'bg-retrix-muted/20 text-retrix-muted',
   analyzing: 'bg-retrix-accent/20 text-retrix-accent',
+  awaiting_approval: 'bg-yellow-500/20 text-yellow-400',
   planning: 'bg-retrix-accent2/20 text-retrix-accent2',
   in_progress: 'bg-blue-500/20 text-blue-400',
   paused: 'bg-retrix-warning/20 text-retrix-warning',

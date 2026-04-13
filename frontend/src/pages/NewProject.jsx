@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { Upload, Rocket, FileText, X, BookOpen } from 'lucide-react'
@@ -34,7 +34,14 @@ export default function NewProject() {
   const [notionFetching, setNotionFetching] = useState(false)
   const [notionFetched, setNotionFetched] = useState(false)
   const [specSource, setSpecSource] = useState('manual') // 'manual' | 'notion'
+  const [workspaceRoot, setWorkspaceRoot] = useState('')
   const fileInputRef = useRef(null)
+
+  useEffect(() => {
+    api.getSettings().then((res) => {
+      setWorkspaceRoot(res.workspace_root || '')
+    }).catch(() => {})
+  }, [])
 
   const update = (field, value) => setForm((prev) => ({ ...prev, [field]: value }))
 
@@ -308,13 +315,15 @@ export default function NewProject() {
         <div>
           <label className="block text-xs text-retrix-muted mb-1.5">
             Workspace Path
-            <span className="text-retrix-muted/50 ml-1">(비워두면 자동 생성: D:\Projects\{'{name}'})</span>
+            {workspaceRoot && (
+              <span className="text-retrix-muted/50 ml-1">(비워두면 자동 생성: {workspaceRoot}\{'{name}'})</span>
+            )}
           </label>
           <input
             type="text"
             value={form.workspace_path}
             onChange={(e) => update('workspace_path', e.target.value)}
-            placeholder="D:\Projects\my-game"
+            placeholder={workspaceRoot ? `${workspaceRoot}\\my-project` : 'C:\\Projects\\my-project'}
             className="w-full bg-retrix-surface border border-retrix-border rounded-md px-3 py-2 text-sm text-retrix-text placeholder:text-retrix-muted/40 focus:outline-none focus:border-retrix-accent font-mono"
           />
         </div>

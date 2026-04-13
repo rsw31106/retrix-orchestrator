@@ -5,7 +5,9 @@
       "Bash(curl:*)",
       "Bash(python -c ':*)",
       "Bash(python:*)",
-      "Bash(uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload)"
+      "Bash(uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(git push:*)",
+      "Bash(npm run:*)"
     ]
   }
 }

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -28,11 +29,13 @@ from app.graph.orchestrator import run_project, dispatch_single_task, resume_pro
 from app.services.github import github_service
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────
 # Startup / Shutdown
 # ──────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -596,17 +599,24 @@ async def notion_sync_preview(
 
     old_spec = project.spec_document or ""
 
+    # Compute unified diff — only changed lines go to LLM
+    import difflib
+    diff_lines = list(difflib.unified_diff(
+        old_spec.splitlines(),
+        new_content.splitlines(),
+        lineterm="",
+        n=3,
+    ))
+    diff_text = "\n".join(diff_lines) if diff_lines else "(no diff computed)"
+
     # Ask PM to analyze the diff
-    pm_prompt = f"""The project spec document has been updated on Notion. Analyze what changed and suggest development tasks.
+    pm_prompt = f"""The project spec document has been updated on Notion. Analyze the diff below and suggest development tasks.
 
 Project: {project.name}
 Project Type: {project.project_type.value}
 
-=== PREVIOUS SPEC ===
-{old_spec[:3000]}
-
-=== UPDATED SPEC (from Notion) ===
-{new_content[:3000]}
+=== SPEC DIFF (unified format, lines starting with + are added, - are removed) ===
+{diff_text}
 
 Please provide:
 1. A concise summary of what changed (bullet points)
@@ -805,6 +815,60 @@ async def list_confirmations(user: dict = Depends(get_current_user)):
     items = [json.loads(v) for v in raw.values()]
     items.sort(key=lambda x: x.get("created_at", ""))
     return items
+
+
+class AnalysisFeedbackRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/confirmations/{conf_id}/feedback")
+async def analysis_feedback(
+    conf_id: str,
+    body: AnalysisFeedbackRequest,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
+    """Submit feedback on PM analysis. PM revises the analysis and publishes the update via WebSocket."""
+    raw = await async_redis.hget("retrix:confirmations", conf_id)
+    if not raw:
+        raise HTTPException(404, "Confirmation not found")
+    conf_data = json.loads(raw)
+    if conf_data.get("confirmation_type") != "analysis_review":
+        raise HTTPException(400, "Not an analysis review confirmation")
+
+    project_id = conf_data["project_id"]
+    current_analysis = conf_data.get("full_analysis") or {}
+    feedback_history = conf_data.get("feedback_history") or []
+
+    # Append user message to history stored in Redis
+    feedback_history.append({"role": "user", "content": body.message})
+    conf_data["feedback_history"] = feedback_history
+    await async_redis.hset("retrix:confirmations", conf_id, json.dumps(conf_data))
+
+    from app.graph.orchestrator import revise_analysis_with_feedback
+
+    async def _run_revision():
+        try:
+            revised = await revise_analysis_with_feedback(
+                conf_id=conf_id,
+                project_id=project_id,
+                current_analysis=current_analysis,
+                user_message=body.message,
+                feedback_history=feedback_history[:-1],  # history before this message
+            )
+            # Append PM reply summary to history
+            raw2 = await async_redis.hget("retrix:confirmations", conf_id)
+            if raw2:
+                d2 = json.loads(raw2)
+                hist = d2.get("feedback_history") or []
+                hist.append({"role": "pm", "content": f"Analysis updated. Key changes incorporated."})
+                d2["feedback_history"] = hist
+                await async_redis.hset("retrix:confirmations", conf_id, json.dumps(d2))
+        except Exception as e:
+            await RedisManager.publish_alert("error", f"Analysis revision failed: {e}", {"conf_id": conf_id})
+
+    background_tasks.add_task(_run_revision)
+    return {"status": "processing"}
 
 
 @app.post("/api/confirmations/{conf_id}/respond")
@@ -1206,6 +1270,7 @@ def get_settings_api(db: Session = Depends(get_db), user: dict = Depends(require
         "project_budget": project_budget,
         "slack_webhook": slack_webhook,
         "notion_api_key": notion_api_key,
+        "workspace_root": settings.workspace_root,
         "models": [{
             "key": m.model_type.value,
             "enabled": m.enabled,
