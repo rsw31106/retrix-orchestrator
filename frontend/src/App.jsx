@@ -61,6 +61,8 @@ export default function App() {
         setConfirmations(prev =>
           prev.map(c => c.id === msg.data.id ? { ...c, ...msg.data } : c)
         )
+      } else if (msg.type === 'confirmation_removed') {
+        setConfirmations(prev => prev.filter(c => c.id !== msg.data.id))
       }
     })
   }, [subscribe, authed])

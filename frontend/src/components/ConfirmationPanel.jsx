@@ -183,7 +183,7 @@ function AnalysisReviewCard({ conf, onRespond }) {
         )}
 
         {/* Feedback chat */}
-        <div className="border border-retrix-border rounded-md overflow-hidden">
+        <div className="border border-retrix-border rounded-md overflow-hidden focus-within:border-retrix-accent/50 transition-colors">
           <div className="bg-retrix-bg px-3 py-1.5 border-b border-retrix-border">
             <p className="text-[10px] text-retrix-muted uppercase tracking-wider">Feedback to PM</p>
           </div>
@@ -218,7 +218,7 @@ function AnalysisReviewCard({ conf, onRespond }) {
           )}
 
           {/* Input */}
-          <div className="flex gap-0 border-t border-retrix-border">
+          <div className="flex border-t border-retrix-border bg-retrix-bg">
             <input
               type="text"
               value={input}
@@ -226,7 +226,7 @@ function AnalysisReviewCard({ conf, onRespond }) {
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendFeedback()}
               placeholder="e.g. Add Redis caching, use TypeScript instead of JS…"
               disabled={loading}
-              className="flex-1 bg-transparent px-3 py-2 text-xs text-retrix-text placeholder-retrix-muted focus:outline-none disabled:opacity-50"
+              className="flex-1 bg-transparent px-3 py-2 text-xs text-retrix-text placeholder-retrix-muted/60 focus:outline-none disabled:opacity-50"
             />
             <button
               onClick={sendFeedback}

@@ -2,8 +2,11 @@
 GitHub integration: create repos, manage branches, commit status.
 """
 import httpx
+import logging
 from typing import Optional
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -81,6 +84,134 @@ class GitHubService:
             "html_url": data["html_url"],
             "default_branch": data["default_branch"],
         }
+
+    async def setup_develop_branch(self, workspace_path: str) -> bool:
+        """Create and checkout develop branch (idempotent — skips if already on develop).
+        Returns True on success."""
+        import subprocess
+        import asyncio
+
+        def _run(cmd: list, cwd: str):
+            return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+        loop = asyncio.get_running_loop()
+
+        await loop.run_in_executor(None, _run,
+            ["git", "config", "user.email", "pm@retrix.ai"], workspace_path)
+        await loop.run_in_executor(None, _run,
+            ["git", "config", "user.name", "Retrix PM"], workspace_path)
+
+        # Check current branch
+        cur = await loop.run_in_executor(None, _run,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], workspace_path)
+        if cur.stdout.strip() == "develop":
+            return True
+
+        # Try to checkout existing remote develop, otherwise create fresh
+        checkout = await loop.run_in_executor(None, _run,
+            ["git", "checkout", "-b", "develop", "--track", "origin/develop"], workspace_path)
+        if checkout.returncode != 0:
+            checkout = await loop.run_in_executor(None, _run,
+                ["git", "checkout", "-b", "develop"], workspace_path)
+        if checkout.returncode != 0:
+            logger.warning(f"[git] failed to create develop branch: {checkout.stderr}")
+            return False
+
+        push = await loop.run_in_executor(None, _run,
+            ["git", "push", "-u", "origin", "develop"], workspace_path)
+        if push.returncode != 0:
+            logger.warning(f"[git] failed to push develop branch: {push.stderr}")
+
+        return True
+
+    async def git_commit_and_push(self, workspace_path: str, message: str) -> bool:
+        """Stage all changes in workspace, commit, and push to develop branch.
+        Returns True if a commit was made, False if nothing to commit."""
+        import subprocess
+        import asyncio
+
+        def _run(cmd: list, cwd: str):
+            return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+        loop = asyncio.get_running_loop()
+
+        await loop.run_in_executor(None, _run,
+            ["git", "config", "user.email", "pm@retrix.ai"], workspace_path)
+        await loop.run_in_executor(None, _run,
+            ["git", "config", "user.name", "Retrix PM"], workspace_path)
+
+        # Ensure we're on develop
+        cur = await loop.run_in_executor(None, _run,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], workspace_path)
+        if cur.stdout.strip() != "develop":
+            await loop.run_in_executor(None, _run,
+                ["git", "checkout", "develop"], workspace_path)
+
+        await loop.run_in_executor(None, _run, ["git", "add", "-A"], workspace_path)
+
+        status = await loop.run_in_executor(None, _run,
+            ["git", "status", "--porcelain"], workspace_path)
+        if not status.stdout.strip():
+            return False  # nothing to commit
+
+        result = await loop.run_in_executor(None, _run,
+            ["git", "commit", "-m", message], workspace_path)
+        if result.returncode != 0:
+            logger.warning(f"[git] commit failed: {result.stderr}")
+            return False
+
+        push = await loop.run_in_executor(None, _run,
+            ["git", "push", "origin", "develop"], workspace_path)
+        if push.returncode != 0:
+            logger.warning(f"[git] push failed: {push.stderr}")
+
+        return True
+
+    async def merge_develop_to_main(self, workspace_path: str, project_name: str) -> bool:
+        """Merge develop into main and push. Returns True on success."""
+        import subprocess
+        import asyncio
+
+        def _run(cmd: list, cwd: str):
+            return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+        loop = asyncio.get_running_loop()
+
+        await loop.run_in_executor(None, _run,
+            ["git", "config", "user.email", "pm@retrix.ai"], workspace_path)
+        await loop.run_in_executor(None, _run,
+            ["git", "config", "user.name", "Retrix PM"], workspace_path)
+
+        # Switch to main (try both 'main' and 'master')
+        checkout = await loop.run_in_executor(None, _run,
+            ["git", "checkout", "main"], workspace_path)
+        if checkout.returncode != 0:
+            checkout = await loop.run_in_executor(None, _run,
+                ["git", "checkout", "master"], workspace_path)
+        if checkout.returncode != 0:
+            logger.warning(f"[git] could not checkout main/master: {checkout.stderr}")
+            return False
+
+        # Pull latest main
+        await loop.run_in_executor(None, _run,
+            ["git", "pull", "origin", "HEAD"], workspace_path)
+
+        # Merge develop with a merge commit (no fast-forward keeps history clean)
+        merge = await loop.run_in_executor(None, _run,
+            ["git", "merge", "--no-ff", "develop",
+             "-m", f"chore: merge develop into main — {project_name} complete"],
+            workspace_path)
+        if merge.returncode != 0:
+            logger.warning(f"[git] merge failed: {merge.stderr}")
+            return False
+
+        push = await loop.run_in_executor(None, _run,
+            ["git", "push", "origin", "HEAD"], workspace_path)
+        if push.returncode != 0:
+            logger.warning(f"[git] push main failed: {push.stderr}")
+            return False
+
+        return True
 
     async def close(self):
         await self.client.aclose()

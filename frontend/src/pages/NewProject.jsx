@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
-import { Upload, Rocket, FileText, X, BookOpen } from 'lucide-react'
+import { Upload, Rocket, FileText, X, BookOpen, ShieldCheck, MessageSquare } from 'lucide-react'
 import clsx from 'clsx'
 
 const projectTypes = [
@@ -25,6 +25,8 @@ export default function NewProject() {
     github_create_repo: false,
     github_repo_name: '',
     github_private: true,
+    custom_rules: '',
+    pause_after_analysis: false,
   })
   const [submitting, setSubmitting] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -370,6 +372,55 @@ export default function NewProject() {
               </div>
             </div>
           )}
+        </div>
+
+        {/* Per-project PM Rules (optional) */}
+        <div className="bg-retrix-bg/50 border border-retrix-border rounded-lg p-4 space-y-2">
+          <div className="flex items-center gap-2">
+            <ShieldCheck size={13} className="text-retrix-accent" />
+            <label className="text-xs text-retrix-muted font-medium uppercase tracking-wider">
+              Project Rules <span className="normal-case text-retrix-muted/50 font-normal">(선택)</span>
+            </label>
+          </div>
+          <p className="text-[11px] text-retrix-muted/60">
+            이 프로젝트에만 적용되는 PM 규칙. 글로벌 룰 뒤에 추가됩니다.
+          </p>
+          <textarea
+            value={form.custom_rules}
+            onChange={(e) => update('custom_rules', e.target.value)}
+            placeholder={'예시:\n- Unity 2022.3 LTS 사용\n- 네임스페이스: Saju.Core\n- 테스트 코드 필수'}
+            rows={4}
+            className="w-full bg-retrix-surface border border-retrix-border rounded-md px-3 py-2 text-xs text-retrix-text placeholder:text-retrix-muted/30 focus:outline-none focus:border-retrix-accent font-mono resize-y"
+          />
+        </div>
+
+        {/* Pause after analysis */}
+        <div
+          onClick={() => update('pause_after_analysis', !form.pause_after_analysis)}
+          className={clsx(
+            'flex items-start gap-3 p-4 rounded-lg border cursor-pointer transition-colors select-none',
+            form.pause_after_analysis
+              ? 'border-retrix-accent/40 bg-retrix-accent/5'
+              : 'border-retrix-border bg-retrix-bg/50 hover:border-retrix-border hover:bg-retrix-bg'
+          )}
+        >
+          <div className={clsx(
+            'mt-0.5 w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition-colors',
+            form.pause_after_analysis ? 'bg-retrix-accent border-retrix-accent' : 'border-retrix-border bg-retrix-surface'
+          )}>
+            {form.pause_after_analysis && <div className="w-2 h-2 bg-white rounded-sm" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2 mb-0.5">
+              <MessageSquare size={13} className={form.pause_after_analysis ? 'text-retrix-accent' : 'text-retrix-muted'} />
+              <span className={clsx('text-xs font-medium', form.pause_after_analysis ? 'text-retrix-accent' : 'text-retrix-muted')}>
+                분석 완료 후 일시정지 — PM과 대화 후 태스크 설계
+              </span>
+            </div>
+            <p className="text-[11px] text-retrix-muted/60">
+              Spec 분석이 완료되면 자동으로 진행하지 않고 일시정지합니다. PM과 대화하여 요구사항을 정리한 뒤 직접 태스크 분해를 시작할 수 있습니다.
+            </p>
+          </div>
         </div>
 
         {/* Submit */}

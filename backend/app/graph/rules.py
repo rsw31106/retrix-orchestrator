@@ -16,7 +16,7 @@ PM_ABSOLUTE_RULES = """
 
 ### 2. 코드 품질
 - 워커가 생성한 코드에는 반드시 에러 핸들링이 포함되어야 한다.
-- 테스트 코드 없는 결과물은 승인하지 마라.
+- 테스트 코드는 태스크 설명에 명시된 경우에만 요구하라. 명시되지 않으면 테스트 코드 부재를 이유로 거부하지 마라.
 - 하드코딩된 시크릿/비밀번호/API키가 코드에 포함되면 즉시 거부하라.
 - .env 또는 환경변수를 통한 설정만 허용하라.
 
@@ -54,6 +54,54 @@ PM_ABSOLUTE_RULES = """
 - 웹 프로젝트: 프론트엔드/백엔드를 분리하여 병렬 배정하라.
 - 모바일 프로젝트: 플랫폼별(iOS/Android) 또는 크로스플랫폼 프레임워크에 맞게 배정하라.
 - 워커가 이전에 같은 프로젝트에서 작업했다면 컨텍스트 유지를 위해 우선 배정하라.
+
+### 9. 리뷰 기준 (REVIEW CRITERIA — STRICT)
+워커 결과물은 터미널 출력(stdout)이다. 실제 파일 내용이 아니다.
+다음 기준으로만 승인/거부를 판단하라:
+
+**승인 조건 (아래 중 하나면 충분)**
+- 워커가 파일을 생성/수정했다는 메시지가 출력에 있다.
+- 워커가 명령을 실행했고 오류 없이 완료되었다.
+- 워커 출력이 태스크의 핵심 요구사항을 달성했음을 합리적으로 보여준다.
+
+**거부 조건 (아래 중 하나라도 있어야 거부 가능)**
+- 출력에 명확한 오류, 예외, 실패 메시지가 있다.
+- 설치/빌드 명령이 실패했다.
+- 워커가 작업을 완료하지 못했다고 명시했다.
+- 코드에 하드코딩된 비밀번호/API키가 포함되어 있다.
+
+**절대 거부 금지 항목**
+- 테스트 코드가 없다는 이유만으로 거부하지 마라 (태스크에 명시된 경우 제외).
+- 출력에 어떤 내용이 "보이지 않는다"는 이유만으로 거부하지 마라.
+- git 커밋 내용이 출력에 없다는 이유만으로 거부하지 마라.
+- 워커가 요약만 출력했다고 해서 작업 미완료로 판단하지 마라 (파일은 이미 생성됐을 수 있다).
+
+### 10. 인프라 접속 정보 (INFRASTRUCTURE — FIXED, DO NOT CHANGE)
+워커에게 태스크 지시를 내릴 때 DB/캐시 관련 설정이 필요하면 반드시 아래 정보를 사용하라.
+Docker, localhost:3306, localhost:5432 등 다른 접속 정보를 절대 사용하거나 추측하지 마라.
+
+**MySQL 8**
+- Host: 127.0.0.1
+- Port: 13306
+- User: root
+- Password: roh8966
+- Charset: utf8mb4
+
+**Redis**
+- Host: 127.0.0.1
+- Port: 6379
+- Password: 없음 (no password)
+
+이 정보는 .env 파일 또는 환경변수로 주입하라. 코드에 직접 하드코딩하지 마라.
+워커 지시서에 DB 연결이 필요한 경우 위 값을 .env 예시로 명시하라:
+```
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=13306
+MYSQL_USER=root
+MYSQL_PASSWORD=roh8966
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+```
 """
 
 
@@ -68,7 +116,7 @@ PM_ABSOLUTE_RULES_EN = """
 
 ### 2. Code Quality
 - All worker output MUST include error handling.
-- REJECT results without test code.
+- Only require test code if it is explicitly mentioned in the task description. Do NOT reject a task solely because test code is absent.
 - IMMEDIATELY reject any code containing hardcoded secrets/passwords/API keys.
 - Only allow configuration via .env or environment variables.
 
@@ -106,4 +154,52 @@ PM_ABSOLUTE_RULES_EN = """
 - Web: split frontend/backend for parallel assignment.
 - Mobile: assign by platform or cross-platform framework.
 - Prefer workers who previously worked on the same project (context continuity).
+
+### 9. Review Criteria (STRICT — READ CAREFULLY)
+Worker output is terminal stdout, NOT the actual code files.
+Evaluate approval/rejection based ONLY on:
+
+**APPROVE if any of these are true:**
+- Output contains messages indicating files were created or modified.
+- Worker ran commands that completed without errors.
+- Output reasonably demonstrates the core requirements were met.
+
+**REJECT only if one of these is true:**
+- Output contains explicit errors, exceptions, or failure messages.
+- Install/build commands failed.
+- Worker explicitly stated it could not complete the task.
+- Code contains hardcoded secrets/passwords/API keys.
+
+**NEVER reject for these reasons:**
+- No test code present (unless explicitly required in the task description).
+- Something is not visible/shown in the output.
+- No git commit shown in the output.
+- Worker output is a summary (files may already have been written to disk).
+
+### 10. Infrastructure (FIXED — DO NOT GUESS OR CHANGE)
+When generating worker instructions that involve DB/cache configuration, ALWAYS use these exact values.
+NEVER use Docker, localhost:3306, localhost:5432, or any other connection info.
+
+**MySQL 8**
+- Host: 127.0.0.1
+- Port: 13306
+- User: root
+- Password: roh8966
+- Charset: utf8mb4
+
+**Redis**
+- Host: 127.0.0.1
+- Port: 6379
+- Password: none
+
+Always inject via .env or environment variables — never hardcode in source.
+When DB connection is needed, include this .env example in the worker instruction:
+```
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=13306
+MYSQL_USER=root
+MYSQL_PASSWORD=roh8966
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+```
 """

@@ -17,6 +17,33 @@ logger = logging.getLogger(__name__)
 # Timeout per worker invocation (seconds). 4h max per PM rules; default 30min.
 DEFAULT_TIMEOUT = 1800  # 30 minutes
 
+# task_id → asyncio.subprocess.Process (실행 중인 프로세스 추적)
+_running_processes: dict[int, asyncio.subprocess.Process] = {}
+
+
+def cancel_task_process(task_id: int) -> bool:
+    """실행 중인 task의 서브프로세스를 강제 종료. 성공 시 True 반환."""
+    proc = _running_processes.pop(task_id, None)
+    if proc and proc.returncode is None:
+        try:
+            proc.kill()
+            logger.info(f"[cancel] Killed process for task {task_id} (pid={proc.pid})")
+            return True
+        except Exception as e:
+            logger.warning(f"[cancel] Failed to kill process for task {task_id}: {e}")
+    return False
+
+
+def get_task_process_status(task_id: int) -> dict:
+    """실행 중인 task의 프로세스 상태 반환."""
+    proc = _running_processes.get(task_id)
+    if proc is None:
+        return {"alive": False, "pid": None}
+    if proc.returncode is not None:
+        # 이미 종료됨
+        return {"alive": False, "pid": proc.pid}
+    return {"alive": True, "pid": proc.pid}
+
 
 @dataclass
 class WorkerResult:
@@ -101,9 +128,11 @@ async def _run_subprocess(
     cwd: str,
     timeout: int = DEFAULT_TIMEOUT,
     env: Optional[dict] = None,
+    task_id: Optional[int] = None,
 ) -> tuple[int, str, str]:
     """Run a subprocess, capture stdout/stderr, enforce timeout."""
     merged_env = {**os.environ, **(env or {})}
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -112,29 +141,47 @@ async def _run_subprocess(
             stderr=asyncio.subprocess.PIPE,
             env=merged_env,
         )
+        if task_id is not None:
+            _running_processes[task_id] = proc
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return proc.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
     except asyncio.TimeoutError:
-        proc.kill()
+        if proc:
+            proc.kill()
         return -1, "", f"Worker timed out after {timeout}s"
     except Exception as e:
         return -1, "", str(e)
+    finally:
+        if task_id is not None:
+            _running_processes.pop(task_id, None)
 
 
-async def invoke_claude_code(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
+async def invoke_claude_code(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT, task_id: Optional[int] = None) -> tuple[int, str, str]:
     """
-    Claude Code CLI: claude -p "<instruction>"
+    Claude Code CLI: claude --dangerously-skip-permissions -p "<instruction>"
     Runs non-interactively (print mode) in the workspace directory.
     Requires 'claude' to be on PATH (npm install -g @anthropic-ai/claude-code).
     """
     if not shutil.which("claude"):
         return -1, "", "claude CLI not found on PATH. Install with: winget install Anthropic.ClaudeCode"
 
-    cmd = ["claude", "-p", instruction, "--dangerously-skip-permissions"]
-    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout)
+    # Prepend directive so the model writes files without asking for approval
+    full_instruction = (
+        "IMPORTANT: Execute this task completely and immediately. "
+        "Write all required files and code right now without asking for any permissions, "
+        "confirmations, or approvals. Do not ask the user for anything — just do it.\n\n"
+        + instruction
+    )
+    cmd = [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--permission-mode", "bypassPermissions",
+        "-p", full_instruction,
+    ]
+    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout, task_id=task_id)
 
 
-async def invoke_codex(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
+async def invoke_codex(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT, task_id: Optional[int] = None) -> tuple[int, str, str]:
     """
     OpenAI Codex CLI: codex --approval-mode full-auto "<instruction>"
     Requires 'codex' to be on PATH (npm install -g @openai/codex).
@@ -144,10 +191,10 @@ async def invoke_codex(instruction: str, workspace: str, timeout: int = DEFAULT_
 
     codex_bin = shutil.which("codex")
     cmd = ["cmd", "/c", codex_bin, "exec", "--full-auto", instruction]
-    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout)
+    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout, task_id=task_id)
 
 
-async def invoke_gemini_cli(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
+async def invoke_gemini_cli(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT, task_id: Optional[int] = None) -> tuple[int, str, str]:
     """
     Gemini CLI: gemini -p "<instruction>" -y
     -p  non-interactive (headless) mode
@@ -158,10 +205,10 @@ async def invoke_gemini_cli(instruction: str, workspace: str, timeout: int = DEF
         return -1, "", "gemini CLI not found on PATH. Install with: npm install -g @google/generative-ai"
 
     cmd = [cli, "-p", instruction, "-y"]
-    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout)
+    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout, task_id=task_id)
 
 
-async def invoke_cursor(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
+async def invoke_cursor(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT, task_id: Optional[int] = None) -> tuple[int, str, str]:
     """
     Cursor standalone CLI: agent -p "<instruction>" --yolo
     -p     non-interactive (headless) mode
@@ -175,14 +222,38 @@ async def invoke_cursor(instruction: str, workspace: str, timeout: int = DEFAULT
             "Install with: irm 'https://cursor.com/install?win32=true' | iex"
         )
 
+    # Pre-create .vscode/settings.json to disable workspace trust prompt.
+    # Cursor inherits VS Code's workspace trust mechanism; this prevents the
+    # interactive "Do you trust the authors of this folder?" dialog that would
+    # block non-interactive execution.
+    try:
+        import json as _json
+        vscode_dir = Path(workspace) / ".vscode"
+        vscode_dir.mkdir(parents=True, exist_ok=True)
+        trust_settings_path = vscode_dir / "settings.json"
+        existing = {}
+        if trust_settings_path.exists():
+            try:
+                existing = _json.loads(trust_settings_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+        existing["security.workspace.trust.enabled"] = False
+        existing["security.workspace.trust.untrustedFiles"] = "open"
+        trust_settings_path.write_text(
+            _json.dumps(existing, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"Could not write workspace trust settings: {e}")
+
     # On Windows, .cmd files must be invoked via cmd /c for correct arg passing.
     # --trust and -f both bypass workspace trust prompt; place before -p so they
     # are processed before the headless mode flag.
     cmd = ["cmd", "/c", agent_bin, "--trust", "-f", "-p", instruction, "--yolo"]
-    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout)
+    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout, task_id=task_id)
 
 
-async def invoke_antigravity(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
+async def invoke_antigravity(instruction: str, workspace: str, timeout: int = DEFAULT_TIMEOUT, task_id: Optional[int] = None) -> tuple[int, str, str]:
     """
     Antigravity worker. Adjust cmd when the actual CLI is known.
     """
@@ -190,7 +261,7 @@ async def invoke_antigravity(instruction: str, workspace: str, timeout: int = DE
         return -1, "", "antigravity CLI not found on PATH."
 
     cmd = ["antigravity", "run", "--prompt", instruction]
-    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout)
+    return await _run_subprocess(cmd, cwd=workspace, timeout=timeout, task_id=task_id)
 
 
 # ──────────────────────────────────────
@@ -254,7 +325,7 @@ async def execute_worker_task(
         )
 
     logger.info(f"Dispatching task {task_id} to {worker_type} on branch {branch}")
-    exit_code, stdout, stderr = await invoker(instruction, workspace, timeout)
+    exit_code, stdout, stderr = await invoker(instruction, workspace, timeout, task_id=task_id)
     success = exit_code == 0
 
     return WorkerResult(

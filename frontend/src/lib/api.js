@@ -20,8 +20,8 @@ export async function fetchApi(path, options = {}) {
     throw new Error('Session expired')
   }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || 'API Error')
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `HTTP ${res.status}`)
   }
   return res.json()
 }
@@ -43,14 +43,22 @@ export const api = {
   createProject: (data) => fetchApi('/projects', { method: 'POST', body: JSON.stringify(data) }),
   pauseProject: (id) => fetchApi(`/projects/${id}/pause`, { method: 'POST' }),
   resumeProject: (id) => fetchApi(`/projects/${id}/resume`, { method: 'POST' }),
+  startDecompose: (id, pmContextNotes = '') =>
+    fetchApi(`/projects/${id}/start-decompose`, { method: 'POST', body: JSON.stringify({ pm_context_notes: pmContextNotes }) }),
+  reassignWorkers: (id) => fetchApi(`/projects/${id}/reassign-workers`, { method: 'POST' }),
   deleteProject: (id) => fetchApi(`/projects/${id}`, { method: 'DELETE' }),
   archiveProject: (id) => fetchApi(`/projects/${id}/archive`, { method: 'POST' }),
   unarchiveProject: (id) => fetchApi(`/projects/${id}/unarchive`, { method: 'POST' }),
 
   // Tasks
+  deleteTask: (id) => fetchApi(`/tasks/${id}`, { method: 'DELETE' }),
+  archiveTask: (id) => fetchApi(`/tasks/${id}/archive`, { method: 'POST' }),
+  unarchiveTask: (id) => fetchApi(`/tasks/${id}/unarchive`, { method: 'POST' }),
   retryTask: (id, body = {}) => fetchApi(`/tasks/${id}/retry`, { method: 'POST', body: JSON.stringify(body) }),
+  taskProcessStatus: (id) => fetchApi(`/tasks/${id}/process-status`),
   holdTask: (id) => fetchApi(`/tasks/${id}/hold`, { method: 'POST' }),
   updateTaskInstruction: (id, instruction) => fetchApi(`/tasks/${id}/instruction`, { method: 'PATCH', body: JSON.stringify({ instruction }) }),
+  updateTaskStatus: (id, status) => fetchApi(`/tasks/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
 
   // Costs
   projectCosts: (id) => fetchApi(`/costs/by-project/${id}`),
@@ -102,6 +110,11 @@ export const api = {
     return fetchApi(`/activity?${q}`)
   },
 
+  // Per-project PM rules
+  getProjectRules: (projectId) => fetchApi(`/projects/${projectId}/rules`),
+  updateProjectRules: (projectId, customRules) =>
+    fetchApi(`/projects/${projectId}/rules`, { method: 'PUT', body: JSON.stringify({ custom_rules: customRules }) }),
+
   // Notion integration
   notionConnect: (projectId, notionPageUrl) =>
     fetchApi(`/projects/${projectId}/notion/connect`, { method: 'POST', body: JSON.stringify({ notion_page_url: notionPageUrl }) }),
@@ -110,6 +123,12 @@ export const api = {
     fetchApi(`/projects/${projectId}/notion/sync-apply`, {
       method: 'POST',
       body: JSON.stringify({ confirmed, change_summary: changeSummary }),
+    }),
+
+  addFeatures: (projectId, featureRequest) =>
+    fetchApi(`/projects/${projectId}/add-features`, {
+      method: 'POST',
+      body: JSON.stringify({ feature_request: featureRequest }),
     }),
 
   // File upload

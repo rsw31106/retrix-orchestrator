@@ -25,7 +25,7 @@ from app.models.models import (
     ProjectStatus, TaskStatus, ModelType, WorkerType,
     User, ActivityLog, UserRole, SystemSetting,
 )
-from app.graph.orchestrator import run_project, dispatch_single_task, resume_project_run
+from app.graph.orchestrator import run_project, dispatch_single_task, resume_project_run, resume_pending_analysis_approvals
 from app.services.github import github_service
 
 settings = get_settings()
@@ -36,6 +36,42 @@ logger = logging.getLogger(__name__)
 # Startup / Shutdown
 # ──────────────────────────────────────
 
+async def _scheduled_retry_loop():
+    """매 분마다 rate-limited HELD 태스크 중 scheduled_retry_at이 지난 것을 PENDING으로 복구."""
+    import datetime as _dt
+    from app.core.database import SessionLocal as _SL
+    while True:
+        await asyncio.sleep(60)
+        try:
+            db = _SL()
+            try:
+                now = _dt.datetime.utcnow()
+                due = db.query(Task).filter(
+                    Task.status == TaskStatus.HELD,
+                    Task.scheduled_retry_at != None,
+                    Task.scheduled_retry_at <= now,
+                ).all()
+                for task in due:
+                    task.status = TaskStatus.PENDING
+                    task.scheduled_retry_at = None
+                    task.error_message = None
+                    logger.info(f"[scheduler] Rate-limit hold lifted for task {task.id}: {task.title}")
+                if due:
+                    db.commit()
+                    # 프로젝트별로 resume 트리거
+                    project_ids = list({t.project_id for t in due})
+                    for pid in project_ids:
+                        proj = db.query(Project).get(pid)
+                        if proj and proj.status not in (ProjectStatus.COMPLETED, ProjectStatus.ARCHIVED if hasattr(ProjectStatus, 'ARCHIVED') else None):
+                            proj.status = ProjectStatus.IN_PROGRESS
+                            db.commit()
+                            asyncio.create_task(resume_project_run(pid))
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"[scheduler] scheduled_retry_loop error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -43,6 +79,8 @@ async def lifespan(app: FastAPI):
     _seed_model_configs()
     _seed_worker_configs()
     _seed_admin_user()
+    await resume_pending_analysis_approvals()
+    asyncio.create_task(_scheduled_retry_loop())
     yield
     await async_redis.close()
     await github_service.close()
@@ -63,6 +101,12 @@ def _migrate_schema():
         ("projects", "notion_page_url",       "ALTER TABLE projects ADD COLUMN notion_page_url VARCHAR(500) NULL"),
         ("projects", "notion_last_content_hash", "ALTER TABLE projects ADD COLUMN notion_last_content_hash VARCHAR(32) NULL"),
         ("projects", "notion_last_synced_at", "ALTER TABLE projects ADD COLUMN notion_last_synced_at DATETIME NULL"),
+        ("projects", "custom_rules",          "ALTER TABLE projects ADD COLUMN custom_rules LONGTEXT NULL"),
+        ("projects", "pause_after_analysis",  "ALTER TABLE projects ADD COLUMN pause_after_analysis TINYINT(1) NOT NULL DEFAULT 0"),
+        ("projects", "pm_context_notes",      "ALTER TABLE projects ADD COLUMN pm_context_notes LONGTEXT NULL"),
+        ("projects", "completion_report",     "ALTER TABLE projects ADD COLUMN completion_report JSON NULL"),
+        ("tasks", "scheduled_retry_at", "ALTER TABLE tasks ADD COLUMN scheduled_retry_at DATETIME NULL"),
+        ("tasks", "archived", "ALTER TABLE tasks ADD COLUMN archived TINYINT(1) NOT NULL DEFAULT 0"),
         # tasks table
         ("tasks", "instruction", "ALTER TABLE tasks ADD COLUMN instruction TEXT NULL"),
         # worker_configs table
@@ -199,6 +243,16 @@ class ProjectCreate(BaseModel):
     github_repo_name: Optional[str] = None
     github_private: bool = True
     notion_page_url: Optional[str] = None   # optional: attach Notion page on creation
+    custom_rules: Optional[str] = None      # per-project PM rules appended after global rules
+    pause_after_analysis: bool = False      # pause after analysis approval for pre-decompose PM chat
+
+
+class ProjectRulesUpdate(BaseModel):
+    custom_rules: str
+
+
+class StartDecomposeRequest(BaseModel):
+    pm_context_notes: str = ""
 
 
 class NotionConnectRequest(BaseModel):
@@ -343,6 +397,9 @@ def get_project(project_id: int, db: Session = Depends(get_db), user: dict = Dep
         "error_message": t.error_message,
         "instruction": t.instruction,
         "result": t.result,
+        "scheduled_retry_at": t.scheduled_retry_at.isoformat() if t.scheduled_retry_at else None,
+        "started_at": t.started_at.isoformat() if t.started_at else None,
+        "archived": bool(t.archived),
     } for t in project.tasks]
     return {
         "id": project.id,
@@ -362,6 +419,10 @@ def get_project(project_id: int, db: Session = Depends(get_db), user: dict = Dep
         "notion_page_id": project.notion_page_id,
         "notion_page_url": project.notion_page_url,
         "notion_last_synced_at": project.notion_last_synced_at.isoformat() if project.notion_last_synced_at else None,
+        "custom_rules": project.custom_rules or "",
+        "pause_after_analysis": bool(project.pause_after_analysis),
+        "pm_context_notes": project.pm_context_notes or "",
+        "completion_report": project.completion_report,
         "tasks": tasks,
         "created_at": project.created_at.isoformat() if project.created_at else None,
     }
@@ -410,6 +471,8 @@ async def create_project(
         notion_page_id=notion_page_id,
         notion_page_url=notion_page_url_stored,
         notion_last_content_hash=notion_content_hash,
+        custom_rules=body.custom_rules or None,
+        pause_after_analysis=body.pause_after_analysis,
     )
     if notion_content_hash:
         import datetime as _dt
@@ -478,6 +541,29 @@ async def _git_clone(clone_url: str, target_dir: str):
         print(f"[WARN] Git clone failed: {e}")
 
 
+@app.get("/api/projects/{project_id}/rules")
+def get_project_rules(project_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404)
+    return {"project_id": project_id, "custom_rules": project.custom_rules or ""}
+
+
+@app.put("/api/projects/{project_id}/rules")
+def update_project_rules(
+    project_id: int,
+    body: ProjectRulesUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404)
+    project.custom_rules = body.custom_rules.strip() or None
+    db.commit()
+    return {"project_id": project_id, "custom_rules": project.custom_rules or ""}
+
+
 @app.post("/api/projects/{project_id}/pause")
 def pause_project(project_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     project = db.query(Project).get(project_id)
@@ -502,6 +588,132 @@ async def resume_project(
     db.commit()
     background_tasks.add_task(resume_project_run, project.id)
     return {"status": "resumed"}
+
+
+async def _run_worker_reassignment(project_id: int, task_ids: list[int]):
+    """Background: use haiku to re-pick the best worker for each PENDING task, then resume from instruct."""
+    from app.core.database import SessionLocal
+    from app.services.model_pool import model_pool
+    from app.graph.prompts import PM_ABSOLUTE_RULES
+
+    db = SessionLocal()
+    try:
+        tasks = db.query(Task).filter(Task.id.in_(task_ids)).all()
+        project = db.query(Project).get(project_id)
+        if not tasks or not project:
+            return
+
+        task_summaries = "\n".join(
+            f"- id={t.id} | title={t.title!r} | description={t.description[:200]!r}"
+            for t in tasks
+        )
+
+        prompt = f"""You are a PM selecting the best AI coding worker for each task.
+
+Available workers and their strengths:
+- claude_code: general coding, backend logic, complex multi-file changes, debugging
+- cursor: frontend UI/CSS, IDE-style targeted file edits
+- codex: OpenAI-powered, code generation from scratch, boilerplate heavy tasks
+- gemini_cli: research, documentation, analysis
+- antigravity: specialized/experimental
+
+Project: {project.name}
+Tasks to assign:
+{task_summaries}
+
+Respond ONLY with JSON array, one entry per task:
+[
+  {{"id": <task_id>, "worker": "<worker_name>", "reason": "<brief reason>"}},
+  ...
+]
+Do NOT default everything to claude_code — distribute workers based on actual task characteristics."""
+
+        response = await model_pool.call(
+            model="haiku",
+            system_prompt="You are a senior PM. Respond only with valid JSON.",
+            user_prompt=prompt,
+            temperature=0.2,
+            max_tokens=1024,
+        )
+
+        import re
+        raw = response.content.strip()
+        json_match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not json_match:
+            logger.error(f"[reassign_workers] Could not parse LLM response: {raw[:300]}")
+            return
+
+        assignments = json.loads(json_match.group())
+        id_to_worker = {a["id"]: a["worker"] for a in assignments if "id" in a and "worker" in a}
+        valid_workers = {w.value for w in WorkerType}
+
+        for task in tasks:
+            raw = (id_to_worker.get(task.id) or "").strip().lower().replace(" ", "_").replace("-", "_")
+            new_worker = raw if raw in valid_workers else WorkerType.CLAUDE_CODE.value
+            task.assigned_worker = WorkerType(new_worker)
+
+        db.commit()
+        logger.info(f"[reassign_workers] Updated workers for {len(tasks)} tasks in project {project_id}")
+    except Exception as e:
+        logger.error(f"[reassign_workers] Failed: {e}")
+    finally:
+        db.close()
+
+    await resume_project_run(project_id)
+
+
+@app.post("/api/projects/{project_id}/reassign-workers")
+async def reassign_workers(
+    project_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Re-assign workers for PENDING/ASSIGNED tasks via LLM. REVIEW/COMPLETED/FAILED/HELD are untouched."""
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404)
+
+    target_statuses = [TaskStatus.PENDING, TaskStatus.ASSIGNED]
+    tasks = db.query(Task).filter(
+        Task.project_id == project_id,
+        Task.status.in_(target_statuses),
+    ).all()
+
+    if not tasks:
+        raise HTTPException(400, "No PENDING/ASSIGNED tasks to reassign")
+
+    task_ids = [t.id for t in tasks]
+    # Reset ASSIGNED → PENDING so instruct regenerates instructions with new worker
+    db.query(Task).filter(Task.id.in_(task_ids)).update(
+        {"status": TaskStatus.PENDING, "instruction": None},
+        synchronize_session=False,
+    )
+    project.status = ProjectStatus.IN_PROGRESS
+    db.commit()
+
+    background_tasks.add_task(_run_worker_reassignment, project_id, task_ids)
+    return {"status": "reassigning", "task_count": len(task_ids)}
+
+
+@app.post("/api/projects/{project_id}/start-decompose")
+async def start_decompose(
+    project_id: int,
+    body: StartDecomposeRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Called after pre-decompose PM discussion. Saves user notes then kicks off task decomposition."""
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404)
+    if body.pm_context_notes.strip():
+        project.pm_context_notes = body.pm_context_notes.strip()
+    project.status = ProjectStatus.IN_PROGRESS
+    db.commit()
+    background_tasks.add_task(resume_project_run, project.id)
+    return {"status": "decomposing"}
 
 
 @app.delete("/api/projects/{project_id}")
@@ -748,6 +960,92 @@ Return ONLY a JSON array in this exact format (no markdown, no explanation):
     return {"status": "applied", "tasks_created": len(created_tasks), "task_titles": created_tasks}
 
 
+class AddFeaturesRequest(BaseModel):
+    feature_request: str  # free-form text describing what to add
+
+
+@app.post("/api/projects/{project_id}/add-features")
+async def add_features(
+    project_id: int,
+    body: AddFeaturesRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """User describes new features in free text. PM generates tasks and resumes execution."""
+    project = db.query(Project).get(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if not body.feature_request.strip():
+        raise HTTPException(400, "feature_request is required")
+
+    from app.services.model_pool import model_pool
+
+    task_prompt = f"""The user wants to add new features or work to an existing project. Generate a structured list of development tasks.
+
+Project: {project.name}
+Project Type: {project.project_type.value if project.project_type else "unknown"}
+Existing spec summary: {(project.spec_document or "")[:1000]}
+
+User's feature request:
+{body.feature_request.strip()}
+
+Return ONLY a JSON array in this exact format (no markdown, no explanation):
+[
+  {{"title": "Task title", "description": "What needs to be done", "priority": 5}},
+  ...
+]"""
+
+    task_response = await model_pool.call(
+        model="haiku",
+        system_prompt="You are Retrix PM. Output only valid JSON arrays, no extra text.",
+        user_prompt=task_prompt,
+        temperature=0.2,
+        max_tokens=2000,
+    )
+
+    created_tasks = []
+    try:
+        raw = task_response.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        task_defs = json.loads(raw.strip())
+        if not isinstance(task_defs, list):
+            task_defs = []
+    except Exception:
+        task_defs = []
+
+    max_order = db.query(Task).filter(Task.project_id == project_id).count()
+    for i, td in enumerate(task_defs):
+        t = Task(
+            project_id=project_id,
+            title=td.get("title", "Untitled task"),
+            description=td.get("description", ""),
+            priority=td.get("priority", 5),
+            order=max_order + i,
+            status=TaskStatus.PENDING,
+        )
+        db.add(t)
+
+    db.commit()
+
+    await _log_activity(
+        "user", user["sub"],
+        f"Added features to project: {project.name}",
+        detail={"tasks_created": len(created_tasks), "feature_request": body.feature_request[:300]},
+        project_id=project_id, db=db,
+    )
+
+    if project.status in (ProjectStatus.COMPLETED, ProjectStatus.PAUSED):
+        project.status = ProjectStatus.IN_PROGRESS
+        db.commit()
+        background_tasks.add_task(resume_project_run, project_id)
+
+    return {"status": "applied", "tasks_created": len(task_defs), "task_titles": [t.get("title") for t in task_defs]}
+
+
 # ──────────────────────────────────────
 # Tasks (protected)
 # ──────────────────────────────────────
@@ -772,9 +1070,11 @@ async def retry_task(
 
 @app.post("/api/tasks/{task_id}/hold")
 def hold_task(task_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    from app.services.worker_executor import cancel_task_process
     task = db.query(Task).get(task_id)
     if not task:
         raise HTTPException(404)
+    cancel_task_process(task_id)
     task.status = TaskStatus.HELD
     db.commit()
     return {"status": "held"}
@@ -782,6 +1082,85 @@ def hold_task(task_id: int, db: Session = Depends(get_db), user: dict = Depends(
 
 class InstructionUpdate(BaseModel):
     instruction: str
+
+
+class TaskStatusUpdate(BaseModel):
+    status: str
+
+
+@app.patch("/api/tasks/{task_id}/status")
+def update_task_status(
+    task_id: int,
+    body: TaskStatusUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    from app.services.worker_executor import cancel_task_process
+    task = db.query(Task).get(task_id)
+    if not task:
+        raise HTTPException(404)
+    try:
+        new_status = TaskStatus(body.status)
+    except ValueError:
+        raise HTTPException(400, detail=f"Invalid status: {body.status}")
+    if new_status == TaskStatus.HELD:
+        cancel_task_process(task_id)
+    task.status = new_status
+    # HELD가 아닌 상태로 수동 변경 시 rate-limit 스케줄 클리어
+    if new_status != TaskStatus.HELD:
+        task.scheduled_retry_at = None
+    db.commit()
+    return {"status": task.status.value}
+
+
+@app.get("/api/tasks/{task_id}/process-status")
+def task_process_status(task_id: int, user: dict = Depends(get_current_user)):
+    """IN_PROGRESS task의 실제 서브프로세스 생존 여부와 PID 반환."""
+    from app.services.worker_executor import get_task_process_status
+    return get_task_process_status(task_id)
+
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    from app.services.worker_executor import cancel_task_process
+    task = db.query(Task).get(task_id)
+    if not task:
+        raise HTTPException(404)
+    if task.status != TaskStatus.HELD:
+        raise HTTPException(400, "Only HELD tasks can be deleted")
+    cancel_task_process(task_id)
+    # CostLog.task_id FK constraint 해제 후 삭제
+    from app.models.models import CostLog
+    db.query(CostLog).filter(CostLog.task_id == task_id).update({"task_id": None})
+    db.delete(task)
+    db.commit()
+    return {"status": "deleted"}
+
+
+@app.post("/api/tasks/{task_id}/archive")
+def archive_task(task_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    task = db.query(Task).get(task_id)
+    if not task:
+        raise HTTPException(404)
+    if task.status != TaskStatus.COMPLETED:
+        raise HTTPException(400, "Only COMPLETED tasks can be archived")
+    task.archived = True
+    db.commit()
+    return {"status": "archived"}
+
+
+@app.post("/api/tasks/{task_id}/unarchive")
+def unarchive_task(task_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    task = db.query(Task).get(task_id)
+    if not task:
+        raise HTTPException(404)
+    task.archived = False
+    db.commit()
+    return {"status": "unarchived"}
 
 
 @app.patch("/api/tasks/{task_id}/instruction")
@@ -831,7 +1210,7 @@ async def analysis_feedback(
     """Submit feedback on PM analysis. PM revises the analysis and publishes the update via WebSocket."""
     raw = await async_redis.hget("retrix:confirmations", conf_id)
     if not raw:
-        raise HTTPException(404, "Confirmation not found")
+        raise HTTPException(404, "Analysis session expired — please reload the page")
     conf_data = json.loads(raw)
     if conf_data.get("confirmation_type") != "analysis_review":
         raise HTTPException(400, "Not an analysis review confirmation")
@@ -849,21 +1228,26 @@ async def analysis_feedback(
 
     async def _run_revision():
         try:
-            revised = await revise_analysis_with_feedback(
+            reply, revised = await revise_analysis_with_feedback(
                 conf_id=conf_id,
                 project_id=project_id,
                 current_analysis=current_analysis,
                 user_message=body.message,
                 feedback_history=feedback_history[:-1],  # history before this message
             )
-            # Append PM reply summary to history
+            # Append PM reply to history and publish WebSocket update
             raw2 = await async_redis.hget("retrix:confirmations", conf_id)
             if raw2:
                 d2 = json.loads(raw2)
                 hist = d2.get("feedback_history") or []
-                hist.append({"role": "pm", "content": f"Analysis updated. Key changes incorporated."})
+                hist.append({"role": "pm", "content": reply})
                 d2["feedback_history"] = hist
                 await async_redis.hset("retrix:confirmations", conf_id, json.dumps(d2))
+                await RedisManager.publish_event(
+                    RedisManager.CHANNEL_CONFIRMATION,
+                    "analysis_updated",
+                    d2,
+                )
         except Exception as e:
             await RedisManager.publish_alert("error", f"Analysis revision failed: {e}", {"conf_id": conf_id})
 

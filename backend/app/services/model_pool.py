@@ -130,8 +130,11 @@ class ModelPool:
         )
         resp.raise_for_status()
         data = resp.json()
+        msg = data["choices"][0]["message"]
+        # deepseek-reasoner puts the answer in reasoning_content when content is empty
+        content = msg.get("content") or msg.get("reasoning_content") or ""
         return {
-            "content": data["choices"][0]["message"]["content"],
+            "content": content,
             "input_tokens": data["usage"]["prompt_tokens"],
             "output_tokens": data["usage"]["completion_tokens"],
         }
